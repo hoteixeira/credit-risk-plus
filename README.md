@@ -1,12 +1,51 @@
-# Credit Risk Plus
+# Credit Risk+ - Implementação Educacional em Python
 
+Uma implementação completa e comentada do modelo **Credit Risk+** desenvolvido pelo Credit Suisse First Boston (1997) para análise de risco de crédito em portfólios de exposições.
 
+## 🎯 Objetivo
 
-## Getting started
+Reproduzir os exemplos do documento original e criar material educacional em **português** que explique:
+- Como o modelo funciona (conceitos e matemática)
+- Os pressupostos fundamentais
+- Como os resultados são gerados
+- Aplicações práticas em gestão de risco de crédito
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## 🚀 Início Rápido
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+### Instalar Dependências
+
+```bash
+cd /Users/henrique/Projects/credit-risk-plus
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Executar um Notebook Interativo
+
+```bash
+jupyter notebook notebooks/01_introducao.ipynb
+```
+
+### Usar o Módulo Python
+
+```python
+from creditriskplus import CreditRiskPlus, data
+
+# Carrega portfólio Example 1A (25 obrigadores)
+portfolio = data.create_example_1a_portfolio()
+
+# Cria e configura o modelo
+model = CreditRiskPlus(unit_size=10000, max_loss_units=10000)
+model.set_portfolio(portfolio)
+
+# Calcula distribuição de perdas
+model.calculate_loss_distribution()
+
+# Obtém resultados
+print(f"Perda Esperada: ${model.expected_loss:,.0f}")
+print(f"VaR (99%): ${model.get_percentile_loss(99):,.0f}")
+print(f"Capital Econômico: ${model.get_economic_capital(99):,.0f}")
+```
 
 ## Add your files
 
