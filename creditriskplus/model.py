@@ -52,7 +52,7 @@ class CreditRiskPlus:
 
     def set_portfolio(self, obligors_df: pd.DataFrame, sector_columns: Optional[List[str]] = None):
         """
-        Define o portfólio de obrigadores.
+        Define o portfólio de contrapartees.
 
         Parâmetros:
         -----------
@@ -88,7 +88,7 @@ class CreditRiskPlus:
         expected_losses : np.ndarray
             Perda esperada em cada banda (ε_j)
         obligor_sector_weights : np.ndarray
-            Matriz (num_obligors x num_sectors) de pesos de setor para cada obrigador
+            Matriz (num_obligors x num_sectors) de pesos de setor para cada contraparte
         """
         if self.obligors is None:
             raise ValueError("Portfólio não foi definido. Use set_portfolio()")
@@ -121,7 +121,7 @@ class CreditRiskPlus:
         sector_params = {}
 
         for sector_name, sector_idx in self.sectors.items():
-            # Pesos de cada obrigador neste setor
+            # Pesos de cada contraparte neste setor
             sector_weights = obligor_sector_weights[:, sector_idx]
 
             # Taxa de default e volatilidade
@@ -156,7 +156,7 @@ class CreditRiskPlus:
                     band = band_sizes[obligor_idx]
                     el = expected_losses[obligor_idx]
 
-                    # Contribuição deste obrigador ao polinômio
+                    # Contribuição deste contraparte ao polinômio
                     coeff = weight * el / band  # ε_j / v_j com peso do setor
 
                     if band <= self.max_loss_units:
@@ -184,8 +184,8 @@ class CreditRiskPlus:
         Recursão:  A_n = (1/n) * Σ_j [ε_j * A_{n-v_j}]
         Onde:
         - A_n = P(loss = n unidades)
-        - ε_j = perda esperada do obrigador j
-        - v_j = tamanho da banda do obrigador j
+        - ε_j = perda esperada do contraparte j
+        - v_j = tamanho da banda do contraparte j
 
         Retorna:
         --------
@@ -367,7 +367,7 @@ class CreditRiskPlus:
 
     def calculate_risk_contributions(self) -> pd.DataFrame:
         """
-        Calcula as contribuições de risco de cada obrigador (Apêndice A, Eq 98-103).
+        Calcula as contribuições de risco de cada contraparte (Apêndice A, Eq 98-103).
 
         A contribuição de risco é definida como o impacto incremental de cada exposição
         na perda esperada e na perda em um percentil específico.

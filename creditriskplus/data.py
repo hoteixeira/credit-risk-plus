@@ -69,7 +69,7 @@ MULTI_YEAR_RATING_TABLE = {
 
 def load_portfolio_from_xls(xls_path, sheet_name='Exposures&StaticData'):
     """
-    Carrega portfólio de obrigadores do arquivo XLS.
+    Carrega portfólio de contrapartees do arquivo XLS.
 
     Parâmetros:
     -----------
@@ -144,7 +144,7 @@ def get_default_rates(rating, year=None, multi_year=False):
 
 def create_example_1a_portfolio():
     """
-    Cria o portfólio de Example 1A (25 obrigadores, 1 setor, taxas variáveis).
+    Cria o portfólio de Example 1A (25 contrapartees, 1 setor, taxas variáveis).
 
     Retorna:
     --------
@@ -196,15 +196,15 @@ def create_example_1a_portfolio():
 
 def create_example_1a_23_obligor_portfolio():
     """
-    Cria o portfólio de Example 1B (25 obrigadores menos 24 e 25 = 23 obrigadores).
+    Cria o portfólio de Example 1B (25 contrapartees menos 24 e 25 = 23 contrapartees).
 
     Retorna:
     --------
     pd.DataFrame
-        Portfólio com 23 obrigadores
+        Portfólio com 23 contrapartees
     """
     portfolio = create_example_1a_portfolio()
-    # Remove obrigadores 24 e 25
+    # Remove contrapartees 24 e 25
     return portfolio[portfolio['obligor_id'] <= 23].reset_index(drop=True)
 
 
@@ -264,7 +264,7 @@ def create_example_2_3sector_portfolio():
 def create_example_3_4sector_portfolio():
     """
     Cria portfólio de Example 3 (4 setores: Específico, EUA, Japão, Europa).
-    Alocação fracionária (pesos somam a 1.0 para cada obrigador).
+    Alocação fracionária (pesos somam a 1.0 para cada contraparte).
 
     Retorna:
     --------
@@ -313,3 +313,79 @@ def create_example_3_4sector_portfolio():
         portfolio_4sector.loc[portfolio_4sector['obligor_id'] == obligor_id, 'sector_weight_Europe'] = alloc['Europe']
 
     return portfolio_4sector
+
+
+def create_example_1c_portfolio():
+    """
+    Cria o portfólio de virtual de Example 1C (horizonte 3 anos, 40 contrapartes virtuais).
+
+    Cada contraparte (contraparte, ano) é tratada como uma contraparte virtual independente
+    com sua exposição específica do ano e taxa marginal condicional de default.
+
+    O perfil de exposição por ano reflete amortizações e vencimentos de créditos:
+    - Ano 1: todas as 25 contrapartes originais
+    - Ano 2: 10 contrapartes com exposição não-zero (algumas com valor reduzido)
+    - Ano 3: 5 contrapartes com exposição não-zero
+
+    Retorna:
+    --------
+    pd.DataFrame
+        40 contrapartes virtuais com: virtual_id, obligor_id, year, exposure,
+        rating, mean_default_rate, std_default_rate, sector_weight_general_economy
+    """
+    # Perfil de exposição por ano (extraído da planilha Excel, aba Example1C)
+    # Format: {obligor_id: {year: exposure}}
+    exposure_profile = {
+        1:  {1: 358475,    2: 358475,    3: 0},
+        2:  {1: 1089819,   2: 0,         3: 0},
+        3:  {1: 1799710,   2: 0,         3: 0},
+        4:  {1: 1933116,   2: 966558,    3: 0},
+        5:  {1: 2317327,   2: 0,         3: 0},
+        6:  {1: 2410929,   2: 0,         3: 0},
+        7:  {1: 2652184,   2: 0,         3: 0},
+        8:  {1: 2957685,   2: 0,         3: 0},
+        9:  {1: 3137989,   2: 3137989,   3: 3137989},
+        10: {1: 3204044,   2: 3204044,   3: 0},
+        11: {1: 4727724,   2: 4727724,   3: 4727724},
+        12: {1: 4830517,   2: 0,         3: 0},
+        13: {1: 4912097,   2: 4912097,   3: 0},
+        14: {1: 4928989,   2: 0,         3: 0},
+        15: {1: 5042312,   2: 0,         3: 0},
+        16: {1: 5320364,   2: 0,         3: 0},
+        17: {1: 5435457,   2: 2717728.5, 3: 0},
+        18: {1: 5517586,   2: 5517586,   3: 5517586},
+        19: {1: 5764596,   2: 2882298,   3: 1441149},
+        20: {1: 5847845,   2: 5847845,   3: 5847845},
+        21: {1: 6466533,   2: 0,         3: 0},
+        22: {1: 6480322,   2: 0,         3: 0},
+        23: {1: 7727651,   2: 0,         3: 0},
+        24: {1: 15410906,  2: 0,         3: 0},
+        25: {1: 20238895,  2: 0,         3: 0},
+    }
+
+    base_portfolio = create_example_1a_portfolio()
+    base_dict = base_portfolio.set_index('obligor_id').to_dict('index')
+
+    rows = []
+    virtual_id = 0
+    for year in [1, 2, 3]:
+        for obligor_id in range(1, 26):
+            exp = exposure_profile[obligor_id][year]
+            if exp <= 0:
+                continue
+            virtual_id += 1
+            rating = base_dict[obligor_id]['rating']
+            year_key = f'year_{year}'
+            rates = MULTI_YEAR_RATING_TABLE[rating][year_key]
+            rows.append({
+                'virtual_id': virtual_id,
+                'obligor_id': obligor_id,
+                'year': year,
+                'exposure': float(exp),
+                'rating': rating,
+                'mean_default_rate': rates['mean'],
+                'std_default_rate': rates['std'],
+                'sector_weight_general_economy': 1.0,
+            })
+
+    return pd.DataFrame(rows)

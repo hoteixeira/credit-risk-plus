@@ -91,14 +91,14 @@ def plot_percentile_losses(percentiles: Dict[float, float], title: str = "Perdas
 
 def plot_risk_contributions(rc_df: pd.DataFrame, top_n: int = 10, figsize=(12, 6)):
     """
-    Plota as contribuições de risco dos obrigadores.
+    Plota as contribuições de risco dos contrapartees.
 
     Parâmetros:
     -----------
     rc_df : pd.DataFrame
         DataFrame com risk_contribution_99pct
     top_n : int
-        Número de obrigadores top a plotar
+        Número de contrapartees top a plotar
     figsize : tuple
         Tamanho da figura
     """
@@ -120,7 +120,7 @@ def plot_risk_contributions(rc_df: pd.DataFrame, top_n: int = 10, figsize=(12, 6
     ax.set_yticks(range(len(df_sorted)))
     ax.set_yticklabels(obligor_labels)
     ax.set_xlabel('Contribuição de Risco @ 99º Percentil (milhões)', fontsize=11)
-    ax.set_title(f'Top {top_n} Obrigadores por Contribuição de Risco', fontsize=12, fontweight='bold')
+    ax.set_title(f'Top {top_n} Contrapartees por Contribuição de Risco', fontsize=12, fontweight='bold')
     ax.grid(axis='x', alpha=0.3)
 
     plt.tight_layout()
@@ -184,7 +184,7 @@ def create_summary_table(model, percentiles: Optional[List[float]] = None) -> pd
     data = {
         'Métrica': [
             'Exposição Total',
-            'Num. Obrigadores',
+            'Num. Contrapartees',
             'Num. Setores',
             'Perda Esperada',
             'Volatilidade (σ)',
