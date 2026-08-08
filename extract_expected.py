@@ -1,53 +1,53 @@
+"""Extrai os KPIs publicados no arquivo XLS oficial do CreditRisk+.
+
+Os valores devem ser lidos da tabela de percentis, e não recalculados a partir
+da PMF exibida: a planilha mostra apenas uma cauda finita e, portanto, o momento
+da coluna visível subestima a perda esperada.
+"""
+
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
 
-xls = pd.ExcelFile('references/CreditRisk+.xls')
-sheets = ['Example1A', 'Example1B', 'Example1C', 'Example2', 'Example3']
 
-results = {}
+def extract_kpis(path: str = "references/CreditRisk+.xls") -> dict[str, dict[str, float]]:
+    """Localiza, por rótulo, a média e o percentil de 99% em cada exemplo."""
 
-for sheet in sheets:
-    df = pd.read_excel(xls, sheet_name=sheet)
-    # The columns 15 and 16 (0-indexed) are typically 'Credit Loss Amount' and 'Probability'
-    # but the exact names might be different. Let's find columns that have 'Probability' in row 8
-    
-    # We can just iterate through columns to find 'Credit' and 'Probability'
-    for c in range(df.shape[1] - 1):
-        if str(df.iloc[8, c]).strip() == 'Amount' and str(df.iloc[8, c+1]).strip() == 'Probability':
-            # It's an Amount and Probability
-            amounts = pd.to_numeric(df.iloc[9:, c], errors='coerce').fillna(0).values
-            probs = pd.to_numeric(df.iloc[9:, c+1], errors='coerce').fillna(0).values
-            
-            # Filter where prob > 0 or amounts are valid
-            valid = (probs >= 0) & (~np.isnan(probs)) & (~np.isnan(amounts))
-            amounts = amounts[valid]
-            probs = probs[valid]
-            
-            if len(amounts) > 0:
-                el = np.sum(amounts * probs)
-                
-                # compute cdf
-                cdf = np.cumsum(probs)
-                
-                # For VaR99, we interpolate or just find the first amount where cdf >= 0.99
-                # Let's find exactly how the spreadsheet does it or just take the exact percentile
-                idx = np.searchsorted(cdf, 0.99)
-                if idx < len(cdf):
-                    # Linear interpolation like in the notebook
-                    if idx == 0:
-                        var_99 = 0
-                    else:
-                        p_lo, p_hi = cdf[idx - 1], cdf[idx]
-                        unit_size = amounts[idx] - amounts[idx-1] if idx > 0 else amounts[0]
-                        frac = (0.99 - p_lo) / (p_hi - p_lo) if p_hi > p_lo else 0.0
-                        var_99 = amounts[idx - 1] + frac * unit_size
-                else:
-                    var_99 = amounts[-1]
-                
-                results[sheet] = {'EL': el, 'VaR99': var_99}
-            break
+    results: dict[str, dict[str, float]] = {}
+    with pd.ExcelFile(path) as workbook:
+        for sheet_name in ["Example1A", "Example1B", "Example1C", "Example2", "Example3"]:
+            frame = pd.read_excel(workbook, sheet_name=sheet_name, header=None)
+            expected_loss = None
+            var_99 = None
 
-print("Theoretical values from Spreadsheet:")
-for sheet, vals in results.items():
-    print(f"{sheet}: EL = {vals['EL']:.0f}, VaR99 = {vals['VaR99']:.0f}")
+            for row in range(len(frame)):
+                for column in range(frame.shape[1] - 1):
+                    label = frame.iat[row, column]
+                    value = frame.iat[row, column + 1]
+                    try:
+                        numeric_value = float(value)
+                    except (TypeError, ValueError):
+                        numeric_value = None
+                    if (
+                        expected_loss is None
+                        and str(label).strip() == "Mean"
+                        and numeric_value is not None
+                    ):
+                        expected_loss = numeric_value
+                    try:
+                        is_99 = float(label) == 99.0
+                    except (TypeError, ValueError):
+                        is_99 = False
+                    if var_99 is None and is_99 and numeric_value is not None:
+                        var_99 = numeric_value
 
+            if expected_loss is None or var_99 is None:
+                raise ValueError(f"KPIs não encontrados na aba {sheet_name}.")
+            results[sheet_name] = {"EL": expected_loss, "VaR99": var_99}
+    return results
+
+
+if __name__ == "__main__":
+    print("Valores publicados na planilha oficial:")
+    for sheet, metrics in extract_kpis().items():
+        print(f"{sheet}: EL = {metrics['EL']:.0f}, VaR99 = {metrics['VaR99']:.0f}")

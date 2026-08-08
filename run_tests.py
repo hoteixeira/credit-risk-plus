@@ -1,148 +1,236 @@
-import nbformat
-from nbconvert.preprocessors import ExecutePreprocessor
-import pandas as pd
-import numpy as np
-import glob
-import os
+"""Suíte rápida de regressão matemática e validação contra o XLS oficial."""
 
-# 1. Extract Theoretical Values from XLS
-xls_path = 'references/CreditRisk+.xls'
-xls = pd.ExcelFile(xls_path)
-sheets = ['Example1A', 'Example1B', 'Example2', 'Example3']
-theory_values = {}
+from __future__ import annotations
 
-for sheet in sheets:
-    df = pd.read_excel(xls, sheet_name=sheet)
-    for c in range(df.shape[1] - 1):
-        if str(df.iloc[8, c]).strip() == 'Amount' and str(df.iloc[8, c+1]).strip() == 'Probability':
-            amounts = pd.to_numeric(df.iloc[9:, c], errors='coerce').fillna(0).values
-            probs = pd.to_numeric(df.iloc[9:, c+1], errors='coerce').fillna(0).values
-            
-            valid = (probs > 0) & (~np.isnan(probs)) & (~np.isnan(amounts))
-            valid_idx = np.where(valid)[0]
-            if len(valid_idx) == 0:
-                continue
-                
-            first_idx, last_idx = valid_idx[0], valid_idx[-1]
-            amounts = amounts[first_idx:last_idx+1]
-            probs = probs[first_idx:last_idx+1]
-            
-            el = np.sum(amounts * probs)
-            cdf = np.cumsum(probs)
-            
-            idx = np.searchsorted(cdf, 0.99)
-            if idx < len(cdf):
-                if idx == 0:
-                    var_99 = 0
-                else:
-                    p_lo, p_hi = cdf[idx - 1], cdf[idx]
-                    unit_size = amounts[idx] - amounts[idx-1] if idx > 0 else amounts[0]
-                    frac = (0.99 - p_lo) / (p_hi - p_lo) if p_hi > p_lo else 0.0
-                    var_99 = amounts[idx - 1] + frac * unit_size
-            else:
-                var_99 = amounts[-1]
-                
-            theory_values[sheet] = {'EL': el, 'VaR99': var_99}
-            break
+import unittest
 
-# Exemplo 1C multi-year is theoretically 3x EL of 1 year, and VaR99 is around 111,450,000.
-# We will use the notebook 1A expected values to infer 1C if needed, or skip strict test.
-
-theory_mapping = {
-    '04_exemplo_1A.ipynb': 'Example1A',
-    '05_exemplo_1B.ipynb': 'Example1B',
-    '07_exemplo_2_setores_geo.ipynb': 'Example2',
-    '08_exemplo_3_setores_fracionarios.ipynb': 'Example3'
-}
-
-# 2. Run Notebooks and Extract Variables
-notebooks = sorted(glob.glob('notebooks/*.ipynb'))
-
-def extract_globals_from_notebook(nb_path):
-    print(f"\\n{'='*60}\\nRunning {nb_path}...")
-    with open(nb_path) as f:
-        nb = nbformat.read(f, as_version=4)
-        
-    # Inject a cell to dump variables
-    injection = """
-import json
 import numpy as np
 
-def _safe_float(v):
-    try:
-        return float(v)
-    except:
-        return None
+from creditriskplus import CreditRiskPlus, data
+from creditriskplus.simple_model import (
+    analytic_loss_moments,
+    calculate_loss_distribution_detailed,
+)
+from extract_expected import extract_kpis
 
-out = {}
-g = globals()
-out['el'] = _safe_float(g.get('el', g.get('el_1b', g.get('total_el_3years', g.get('total_el_example2', g.get('total_el_ex3'))))))
-out['var_99'] = _safe_float(g.get('var_99', g.get('loss_99_1b', g.get('loss_99_3y', g.get('loss_99_example2', g.get('loss_99_ex3'))))))
 
-with open('nb_vars.json', 'w') as f:
-    json.dump(out, f)
-"""
-    new_cell = nbformat.v4.new_code_cell(source=injection)
-    nb.cells.append(new_cell)
-    
-    ep = ExecutePreprocessor(timeout=600, kernel_name='python3')
-    ep.preprocess(nb, {'metadata': {'path': 'notebooks/'}})
-    
-    import json
-    with open('notebooks/nb_vars.json') as f:
-        vars = json.load(f)
-    os.remove('notebooks/nb_vars.json')
-    return vars
+class CreditRiskPlusMathematicalTests(unittest.TestCase):
+    """Testa identidades que independem dos exemplos da planilha."""
 
-all_passed = True
+    def test_poisson_limit_matches_closed_form(self):
+        """Com severidade unitária, compara a recursão à PMF Poisson fechada."""
 
-for nb_path in notebooks:
-    if 'exemplo' not in nb_path:
-        continue
-        
-    nb_name = os.path.basename(nb_path)
-    try:
-        res = extract_globals_from_notebook(nb_path)
-        el = res.get('el')
-        var_99 = res.get('var_99')
-        
-        print(f"Results from {nb_name}:")
-        print(f"  EL:     {el}")
-        print(f"  VaR_99: {var_99}")
-        
-        if nb_name in theory_mapping:
-            sheet = theory_mapping[nb_name]
-            theory = theory_values[sheet]
-            
-            t_el = theory['EL']
-            t_var = theory['VaR99']
-            
-            el_err = abs(el - t_el) / t_el if t_el else 0
-            
-            print(f"Theory ({sheet}):")
-            print(f"  EL:     {t_el} (Error: {el_err*100:.2f}%)")
-            
-            if el_err > 0.01:
-                print(f"  [!] EL Error > 1%!")
-                all_passed = False
-                
-            if var_99 is not None and t_var is not None:
-                var_err = abs(var_99 - t_var) / t_var if t_var else 0
-                print(f"  VaR_99: {t_var} (Error: {var_err*100:.2f}%)")
-                if var_err > 0.01:
-                    print(f"  [!] VaR_99 Error > 1%!")
-                    all_passed = False
-            else:
-                print(f"  VaR_99: {t_var} (Not compared)")
-        else:
-            print(f"  No explicit spreadsheet sheet to compare.")
-            
-    except Exception as e:
-        print(f"FAILED TO RUN {nb_name}: {e}")
-        all_passed = False
+        # Com severidade de uma unidade, a perda em unidades é Poisson(mu).
+        exposures = np.ones(3) * 100.0
+        pd_mean = np.array([0.02, 0.03, 0.05])
+        result = calculate_loss_distribution_detailed(
+            exposures,
+            pd_mean,
+            np.zeros(3),
+            np.zeros(3),
+            unit_size=100.0,
+            max_loss_dollars=2_000.0,
+        )
+        mu = pd_mean.sum()
+        expected = np.empty_like(result.pmf)
+        expected[0] = np.exp(-mu)
+        for n in range(1, len(expected)):
+            expected[n] = expected[n - 1] * mu / n
+        np.testing.assert_allclose(result.pmf, expected, rtol=2e-14, atol=1e-16)
 
-if all_passed:
-    print("\\nSUCCESS: All notebooks passed the theory validation within 1% tolerance.")
-else:
-    print("\\nFAILURE: Some notebooks failed the theory validation.")
-    exit(1)
+    def test_pmf_moments_match_analytic_formula(self):
+        """Compara momentos somados da PMF às equações analíticas 115--118."""
+
+        portfolio = data.create_example_1a_portfolio()
+        result = calculate_loss_distribution_detailed(
+            portfolio.exposure,
+            portfolio.mean_default_rate,
+            portfolio.std_default_rate,
+            np.zeros(len(portfolio)),
+            max_loss_dollars=400_000_000,
+        )
+        mean, variance = analytic_loss_moments(
+            portfolio.exposure,
+            portfolio.mean_default_rate,
+            portfolio.std_default_rate,
+            np.zeros(len(portfolio)),
+            unit_size=result.unit_size,
+        )
+        losses = np.arange(len(result.pmf)) * result.unit_size
+        pmf_mean = np.dot(losses, result.pmf)
+        pmf_variance = np.dot((losses - mean) ** 2, result.pmf)
+        self.assertLess(result.tail_mass_upper_bound, 1e-12)
+        self.assertAlmostEqual(pmf_mean / mean, 1.0, places=10)
+        self.assertAlmostEqual(pmf_variance / variance, 1.0, places=8)
+
+    def test_log_recursion_survives_underflow_of_zero_loss_probability(self):
+        """Mantém a massa perto do modo quando exp(-mu) não cabe em float64."""
+
+        result = calculate_loss_distribution_detailed(
+            [1.0],
+            [0.01],
+            [0.0],
+            [0.0],
+            unit_size=1.0,
+            max_loss_dollars=1_400.0,
+            obligor_counts=[80_000],  # mu = 800 e exp(-mu) subflui
+        )
+        losses = np.arange(len(result.pmf))
+        self.assertAlmostEqual(result.pmf.sum(), 1.0, places=12)
+        self.assertAlmostEqual(np.dot(losses, result.pmf), 800.0, places=8)
+
+    def test_input_expected_loss_is_preserved_by_banding(self):
+        """Garante que o ajuste de PD compense o arredondamento das bandas."""
+
+        exposures = np.array([101.0, 249.0, 907.0])
+        pd_mean = np.array([0.01, 0.08, 0.23])
+        recovery = np.array([0.1, 0.4, 0.2])
+        result = calculate_loss_distribution_detailed(
+            exposures,
+            pd_mean,
+            pd_mean * 0.5,
+            recovery,
+            unit_size=100.0,
+            max_loss_dollars=20_000.0,
+        )
+        exact = np.dot(exposures * (1.0 - recovery), pd_mean)
+        self.assertAlmostEqual(result.expected_loss, exact, places=12)
+
+    def test_invalid_sector_weights_are_rejected(self):
+        """Rejeita uma decomposição que viole a equação 90."""
+
+        with self.assertRaisesRegex(ValueError, "devem somar 1"):
+            calculate_loss_distribution_detailed(
+                [100, 200],
+                [0.01, 0.02],
+                [0.005, 0.01],
+                [0, 0],
+                sector_weights_matrix=[[0.4, 0.4], [0.5, 0.5]],
+            )
+
+    def test_group_multiplicity_equals_literal_expansion(self):
+        """Demonstra que multiplicidades são compressão exata de pools iguais."""
+
+        # Pools homogêneos são uma compressão exata, usada no notebook de safras.
+        exposures = np.array([100.0, 250.0])
+        pd_mean = np.array([0.02, 0.08])
+        pd_std = pd_mean * 0.5
+        counts = np.array([3, 4])
+        grouped = calculate_loss_distribution_detailed(
+            exposures,
+            pd_mean,
+            pd_std,
+            np.zeros(2),
+            unit_size=50.0,
+            max_loss_dollars=5_000.0,
+            obligor_counts=counts,
+        )
+        expanded = calculate_loss_distribution_detailed(
+            np.repeat(exposures, counts),
+            np.repeat(pd_mean, counts),
+            np.repeat(pd_std, counts),
+            np.zeros(counts.sum()),
+            unit_size=50.0,
+            max_loss_dollars=5_000.0,
+        )
+        np.testing.assert_allclose(grouped.pmf, expanded.pmf, rtol=0, atol=2e-16)
+        self.assertEqual(grouped.expected_loss, expanded.expected_loss)
+
+    def test_class_and_function_share_the_same_core(self):
+        """Evita regressão para duas implementações matemáticas divergentes."""
+
+        portfolio = data.create_example_3_4sector_portfolio()
+        sector_columns = [column for column in portfolio if column.startswith("sector_weight_")]
+        model = CreditRiskPlus(max_loss_units=800)
+        model.set_portfolio(
+            portfolio,
+            sector_columns=sector_columns,
+            idiosyncratic_sector_columns=["sector_weight_Specific"],
+        )
+        model.calculate_loss_distribution()
+        direct = calculate_loss_distribution_detailed(
+            portfolio.exposure,
+            portfolio.mean_default_rate,
+            portfolio.std_default_rate,
+            np.zeros(len(portfolio)),
+            portfolio[sector_columns].to_numpy(),
+            [sector_columns.index("sector_weight_Specific")],
+            unit_size=model.unit_size,
+            max_loss_dollars=model.max_loss_units * model.unit_size,
+        )
+        np.testing.assert_allclose(model.loss_pmf, direct.pmf, rtol=0, atol=0)
+        contributions = model.calculate_risk_contributions()
+        self.assertAlmostEqual(
+            contributions["risk_contribution_std"].sum() / model.loss_std,
+            1.0,
+            places=12,
+        )
+
+
+class SpreadsheetRegressionTests(unittest.TestCase):
+    """Compara os quatro exemplos de um ano com os outputs do XLS oficial."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Lê uma vez os KPIs gravados no arquivo de referência."""
+
+        cls.references = extract_kpis()
+
+    def _assert_example(self, sheet, portfolio, weights=None, idiosyncratic=None):
+        """Executa uma regressão de EL, VaR interpolado e massa de cauda."""
+
+        result = calculate_loss_distribution_detailed(
+            portfolio.exposure,
+            portfolio.mean_default_rate,
+            portfolio.std_default_rate,
+            np.zeros(len(portfolio)),
+            sector_weights_matrix=weights,
+            idiosyncratic_sector_indices=idiosyncratic,
+            max_loss_dollars=250_000_000,
+        )
+        reference = self.references[sheet]
+        self.assertAlmostEqual(result.expected_loss, reference["EL"], delta=0.51)
+        self.assertAlmostEqual(
+            result.quantile(0.99, interpolate=True),
+            reference["VaR99"],
+            delta=1.0,
+        )
+        self.assertLess(result.tail_mass_upper_bound, 3e-7)
+
+    def test_example_1a(self):
+        """Valida a carteira de 25 contrapartes e um fator."""
+
+        self._assert_example("Example1A", data.create_example_1a_portfolio())
+
+    def test_example_1b(self):
+        """Valida a retirada das duas maiores exposições."""
+
+        self._assert_example("Example1B", data.create_example_1a_23_obligor_portfolio())
+
+    def test_example_1c(self):
+        """Valida o perfil virtual de três anos da planilha."""
+
+        self._assert_example("Example1C", data.create_example_1c_portfolio())
+
+    def test_example_2(self):
+        """Valida três setores geográficos exclusivos."""
+
+        portfolio = data.create_example_2_3sector_portfolio()
+        columns = [column for column in portfolio if column.startswith("sector_weight_")]
+        self._assert_example("Example2", portfolio, portfolio[columns].to_numpy())
+
+    def test_example_3_specific_sector(self):
+        """Valida pesos fracionários e o limite Poisson do setor específico."""
+
+        portfolio = data.create_example_3_4sector_portfolio()
+        columns = [column for column in portfolio if column.startswith("sector_weight_")]
+        self._assert_example(
+            "Example3",
+            portfolio,
+            portfolio[columns].to_numpy(),
+            [columns.index("sector_weight_Specific")],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

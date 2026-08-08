@@ -3,6 +3,8 @@
 Implementação completa do modelo **Credit Risk+** (Credit Suisse First Boston, 1997) com notebooks educacionais em português. Este repositório serve como guia de estudos e ferramenta prática para modelagem de risco de crédito de portfólio.
 
 > **Documentação completa**: consulte a [Wiki do projeto](wiki/Home) para uma referência técnica detalhada, demonstrações matemáticas e discussão aprofundada do arcabouço teórico.
+>
+> **Auditoria matemática**: consulte [AUDITORIA_TECNICA.md](AUDITORIA_TECNICA.md) para os achados, correções, regressões contra o XLS e limitações remanescentes.
 
 ---
 
@@ -156,6 +158,7 @@ pmf, el = calculate_loss_distribution(
     idiosyncratic_sector_indices=None,  # lista de índices de setores idiossincráticos
     unit_size=None,                     # L (None = ceil(max_exp / 100))
     max_loss_dollars=150_000_000,       # truncamento da distribuição
+    obligor_counts=None,                # multiplicidade exata de pools homogêneos
 )
 ```
 
@@ -169,11 +172,14 @@ pmf, el = calculate_loss_distribution(
 | `idiosyncratic_sector_indices` | Índices de setores idiossincráticos |
 | `unit_size` | Unidade de perda $L$ |
 | `max_loss_dollars` | Perda máxima a calcular |
+| `obligor_counts` | Número de contratos idênticos representados por cada linha |
 
 **Retornos**:
 
 - `pmf`: array $A[n] = \mathbb{P}(\text{perda} = n \cdot L)$.
 - `el`: perda esperada em dólares.
+
+Para auditar a massa truncada e os parâmetros setoriais, use `calculate_loss_distribution_detailed`.
 
 ---
 
@@ -190,13 +196,14 @@ pmf, el = calculate_loss_distribution(
 | [07_exemplo_2_setores_geo.ipynb](notebooks/07_exemplo_2_setores_geo.ipynb) | 3 setores geográficos |
 | [08_exemplo_3_setores_fracionarios.ipynb](notebooks/08_exemplo_3_setores_fracionarios.ipynb) | Pesos fracionários + setor específico |
 | [09_aplicacoes.ipynb](notebooks/09_aplicacoes.ipynb) | ACP, ICR, limites, stress testing e RARoC |
-| [10_simulacao_portfolio_varejo.ipynb](notebooks/10_simulacao_portfolio_varejo.ipynb) | 1M clientes × 24 meses com Markov e choque macro |
+| [10_simulacao_portfolio_varejo.ipynb](notebooks/10_simulacao_portfolio_varejo.ipynb) | Aviso de substituição da antiga simulação agregada |
+| [11_safras_pf_brasil_creditriskplus.ipynb](notebooks/11_safras_pf_brasil_creditriskplus.ipynb) | 36 safras PF brasileiras, 12 de ramp-up e 24 reportadas |
 
 ---
 
 ## Validação
 
-Todos os exemplos reproduzem os resultados da planilha `CreditRisk+.xls` com erro < 0,001%, exceto o Exemplo 3 (setor específico), que apresenta erro de +0,579% no VaR(99%) devido à ausência do código VBA original.
+Os cinco exemplos reproduzem a planilha `CreditRisk+.xls` com diferença inferior a uma unidade monetária na EL e no VaR interpolado. No Exemplo 3, a Seção A12.3 é aplicada literalmente: a variância do setor específico é zerada.
 
 | Exemplo | E[Loss] (ref) | VaR(99%) (ref) | Erro EL | Erro VaR |
 |---------|--------------:|---------------:|:-------:|:--------:|
@@ -204,7 +211,9 @@ Todos os exemplos reproduzem os resultados da planilha `CreditRisk+.xls` com err
 | 1B | \$11.162.856 | \$39.946.857 | 0,000% | 0,000% |
 | 1C | \$17.277.632 | \$62.100.307 | 0,000% | 0,000% |
 | 2 | \$14.221.863 | \$49.931.502 | 0,000% | 0,000% |
-| 3 | \$14.221.863 | \$47.368.235 | 0,000% | +0,579% |
+| 3 | \$14.221.863 | \$47.368.235 | 0,000% | 0,000% |
+
+O VaR econômico retornado pela API é o quantil discreto. A interpolação linear é oferecida somente para comparação com a convenção de reporte do XLS. A massa de cauda truncada não é renormalizada e pode ser auditada por `calculate_loss_distribution_detailed`.
 
 ---
 

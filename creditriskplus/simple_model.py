@@ -1,46 +1,308 @@
+"""Núcleo matemático do modelo CreditRisk+.
+
+Este módulo implementa as equações do Apêndice A do manual do Credit Suisse
+First Boston (1997). A implementação preserva três propriedades importantes:
+
+* a exposição é arredondada para cima em bandas, como na planilha de referência;
+* a probabilidade de default é compensada para que a perda esperada original
+  não seja alterada pelo arredondamento (equações 11--13);
+* a massa além do limite calculado não é renormalizada. Assim, um truncamento
+  insuficiente fica visível em vez de contaminar silenciosamente os percentis.
+
+O modelo é analítico. A aleatoriedade aparece na distribuição que ele descreve,
+mas o algoritmo em si é determinístico e, portanto, inteiramente reprodutível.
 """
-Credit Risk+ — Distribuição de perdas por defaults de crédito.
 
-Implementa a recursão exata da Seção A10 do Apêndice A (Credit Suisse, 1997):
+from __future__ import annotations
 
-MODELO COM TAXA VARIÁVEL (Binomial Negativa) — Equações 79-80
---------------------------------------------------------------
-PGF: G(z) = ((1-p) / (1 - p·P(z)))^α
-
-Recursão derivada da derivada logarítmica (eq. 72/77):
-    A_n = (p / (n·μ)) · Σ_j ε_j · (α - 1 + n/v_j) · A_{n-v_j}
-
-Onde:
-    L   = ceil(max_exposure / 100)  (tamanho da unidade de perda)
-    v_j = ceil(E_A / L)             (banda de exposição — arredondamento para cima)
-    ε_j = p_A · E_A / L             (perda esperada da contraparte j em unidades L)
-    μ   = Σ_A ε_A / v_A             (número esperado de defaults, eq. 38/96)
-    σ   = Σ_A σ_A · (E_A/L) / v_A  (desvio padrão efetivo do setor)
-    α   = μ² / σ²                   (parâmetro de forma BN; = 4 quando CV = 0,5)
-    β   = σ² / μ                    (parâmetro de escala BN)
-    p   = β / (1 + β)               (probabilidade BN)
-    A_0 = (1 − p)^α                 (prob. de perda zero)
-
-MODELO MULTI-SETOR (Seções A7–A9):
-    G_total(z) = ∏_k G_k(z)  — PGF total = produto das PGFs setoriais
-    Cada setor k usa apenas as contrapartes com peso θ_Ak > 0,
-    com exposições baseadas na exposição TOTAL (banda v_A = ceil(E_A/L)).
-
-SETOR IDIOSSINCRÁTICO (Seção A12 — Specific sector):
-    Para o setor específico (risco individual), cada contraparte possui
-    seu próprio fator Gamma independente. A PMF do setor é a convolução
-    de 25 distribuições NB individuais, uma por contraparte.
-
-CONVERGÊNCIA PARA POISSON (seção A11):
-    Quando σ → 0: A_n → (1/n) · Σ_j ε_j · A_{n-v_j}  (Poisson)
-"""
+from dataclasses import dataclass
+from typing import Iterable, Sequence
 
 import numpy as np
+from scipy.signal import fftconvolve
+from scipy.special import logsumexp
+
+
+@dataclass(frozen=True)
+class SectorParameters:
+    """Parâmetros do fator Gama associado a um setor (equações 52 e 60)."""
+
+    mean_defaults: float
+    std_defaults: float
+    expected_loss_units: float
+    alpha: float
+    beta: float
+    negative_binomial_p: float
+
+
+@dataclass(frozen=True)
+class LossDistributionResult:
+    """Resultado completo, incluindo diagnósticos que a API histórica omitia."""
+
+    pmf: np.ndarray
+    unit_size: float
+    expected_loss: float
+    pmf_expected_loss: float
+    tail_mass_upper_bound: float
+    sector_parameters: tuple[SectorParameters, ...]
+
+    @property
+    def cdf(self) -> np.ndarray:
+        """Distribuição acumulada no suporte discreto ``n * unit_size``."""
+
+        return np.cumsum(self.pmf)
+
+    def quantile(self, confidence: float, *, interpolate: bool = False) -> float:
+        """Retorna o quantil de perda, verificando antes a massa truncada.
+
+        ``interpolate=False`` devolve o VaR matemático da distribuição discreta.
+        A interpolação existe apenas para reproduzir a convenção da planilha XLS;
+        ela não transforma a distribuição em contínua.
+        """
+
+        return loss_quantile(
+            self.pmf,
+            confidence,
+            self.unit_size,
+            interpolate=interpolate,
+        )
+
+
+def _as_float_vector(values, name: str) -> np.ndarray:
+    """Converte um input unidimensional e rejeita NaN ou infinito cedo."""
+
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim != 1:
+        raise ValueError(f"{name} deve ser um vetor unidimensional.")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} contém NaN ou infinito.")
+    return array
+
+
+def _validate_inputs(
+    exposures,
+    mean_default_rates,
+    std_default_rates,
+    recovery_rates,
+    sector_weights_matrix,
+    idiosyncratic_sector_indices,
+    obligor_counts=None,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    set[int],
+    np.ndarray,
+]:
+    """Valida as hipóteses de domínio das equações 90, 95 e 97."""
+
+    exposures = _as_float_vector(exposures, "exposures")
+    mean_rates = _as_float_vector(mean_default_rates, "mean_default_rates")
+    std_rates = _as_float_vector(std_default_rates, "std_default_rates")
+    recoveries = _as_float_vector(recovery_rates, "recovery_rates")
+
+    lengths = {len(exposures), len(mean_rates), len(std_rates), len(recoveries)}
+    if len(lengths) != 1 or not len(exposures):
+        raise ValueError("Os quatro vetores devem ter o mesmo tamanho positivo.")
+    if np.any(exposures < 0):
+        raise ValueError("Exposições não podem ser negativas.")
+    if np.any((mean_rates < 0) | (mean_rates > 1)):
+        raise ValueError("As PDs médias devem pertencer ao intervalo [0, 1].")
+    if np.any(std_rates < 0):
+        raise ValueError("Desvios padrão de PD não podem ser negativos.")
+    if np.any((recoveries < 0) | (recoveries > 1)):
+        raise ValueError("Taxas de recuperação devem pertencer a [0, 1].")
+
+    if sector_weights_matrix is None:
+        weights = np.ones((len(exposures), 1), dtype=np.float64)
+    else:
+        weights = np.asarray(sector_weights_matrix, dtype=np.float64)
+        if weights.ndim != 2 or weights.shape[0] != len(exposures) or not weights.shape[1]:
+            raise ValueError("sector_weights_matrix deve ter formato (N, K), com K >= 1.")
+        if not np.all(np.isfinite(weights)) or np.any(weights < 0):
+            raise ValueError("Pesos setoriais devem ser finitos e não negativos.")
+        # A tolerância cobre apenas ruído de ponto flutuante; não corrige alocações.
+        if not np.allclose(weights.sum(axis=1), 1.0, rtol=0.0, atol=1e-10):
+            raise ValueError("Os pesos setoriais de cada contraparte devem somar 1.")
+
+    idiosyncratic = {int(index) for index in (idiosyncratic_sector_indices or [])}
+    if any(index < 0 or index >= weights.shape[1] for index in idiosyncratic):
+        raise ValueError("Índice de setor específico fora dos limites da matriz.")
+
+    if obligor_counts is None:
+        counts = np.ones(len(exposures), dtype=np.float64)
+    else:
+        counts = _as_float_vector(obligor_counts, "obligor_counts")
+        if len(counts) != len(exposures):
+            raise ValueError("obligor_counts deve ter o mesmo tamanho das exposições.")
+        if np.any(counts < 0) or not np.allclose(counts, np.round(counts), atol=1e-10):
+            raise ValueError("obligor_counts deve conter inteiros não negativos.")
+
+    return exposures, mean_rates, std_rates, recoveries, weights, idiosyncratic, counts
 
 
 def _compute_unit_size(net_exposures: np.ndarray) -> float:
-    """Unidade de perda L = ceil(max_exposure / 100), conforme planilha Excel."""
-    return float(np.ceil(net_exposures.max() / 100.0))
+    """Calcula ``L = ceil(max(L_A) / 100)``, convenção do XLS oficial."""
+
+    maximum = float(np.max(net_exposures))
+    if maximum <= 0:
+        raise ValueError("Ao menos uma exposição líquida deve ser positiva.")
+    return float(np.ceil(maximum / 100.0))
+
+
+def _band_portfolio(net_exposures: np.ndarray, unit_size: float) -> tuple[np.ndarray, np.ndarray]:
+    """Retorna bandas inteiras e razões exatas ``L_A/L`` antes do arredondamento."""
+
+    exact_bands = net_exposures / unit_size
+    # Exposições líquidas nulas não geram perda. O valor 1 evita divisão por zero;
+    # seus epsilons também serão zero e, portanto, não afetam nenhuma equação.
+    bands = np.maximum(np.ceil(exact_bands).astype(np.int64), 1)
+    return bands, exact_bands
+
+
+def _sector_parameters(
+    exact_bands: np.ndarray,
+    bands: np.ndarray,
+    mean_rates: np.ndarray,
+    std_rates: np.ndarray,
+    weights: np.ndarray,
+    counts: np.ndarray,
+) -> tuple[SectorParameters, np.ndarray]:
+    """Calcula ``mu_k``, ``sigma_k`` e os epsilons das equações 94, 96 e 97."""
+
+    # epsilon_Ak = theta_Ak * p_A * L_A/L. A divisão posterior por nu_A
+    # é o ajuste de PD que preserva a perda esperada após o banding.
+    epsilons = counts * weights * mean_rates * exact_bands
+    mean_defaults = float(np.sum(epsilons / bands))
+    expected_loss_units = float(np.sum(epsilons))
+
+    # sigma_A também recebe o ajuste de banding aplicado à PD média. Esta é a
+    # versão por contraparte de sigma_k = sum(theta_Ak * sigma_A), eq. 97.
+    std_defaults = float(np.sum(counts * weights * std_rates * exact_bands / bands))
+
+    if mean_defaults <= 0:
+        alpha = np.inf
+        beta = 0.0
+        nb_p = 0.0
+    elif std_defaults == 0:
+        alpha = np.inf
+        beta = 0.0
+        nb_p = 0.0
+    else:
+        beta = std_defaults**2 / mean_defaults
+        alpha = mean_defaults / beta  # algebricamente igual a mu^2/sigma^2
+        nb_p = beta / (1.0 + beta)
+
+    params = SectorParameters(
+        mean_defaults=mean_defaults,
+        std_defaults=std_defaults,
+        expected_loss_units=expected_loss_units,
+        alpha=alpha,
+        beta=beta,
+        negative_binomial_p=nb_p,
+    )
+    return params, epsilons
+
+
+def _aggregate_epsilon_by_band(
+    bands: np.ndarray,
+    epsilons: np.ndarray,
+    max_n: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Agrupa contratos de mesma severidade sem alterar a PGF do portfólio."""
+
+    relevant = (epsilons > 0) & (bands <= max_n)
+    if not np.any(relevant):
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    totals = np.bincount(bands[relevant], weights=epsilons[relevant], minlength=max_n + 1)
+    nonzero_bands = np.flatnonzero(totals)
+    return nonzero_bands, totals[nonzero_bands]
+
+
+def _sector_distribution_from_bands(
+    bands: np.ndarray,
+    epsilons: np.ndarray,
+    params: SectorParameters,
+    max_n: int,
+) -> np.ndarray:
+    """Aplica a recursão NB (A10) ou seu limite Poisson (A11)."""
+
+    distribution = np.zeros(max_n + 1, dtype=np.float64)
+    if params.mean_defaults <= 0:
+        distribution[0] = 1.0
+        return distribution
+
+    severity_bands, epsilon_by_band = _aggregate_epsilon_by_band(bands, epsilons, max_n)
+    mu = params.mean_defaults
+
+    if params.std_defaults == 0:
+        # Da eq. 81: G(0)=exp(-mu). Usar sum(epsilon) aqui seria dimensionalmente
+        # errado e faria A_0 depender do tamanho arbitrário da unidade monetária.
+        log_a0 = -mu
+        if log_a0 < -700.0:
+            # Para carteiras muito grandes, A0 pode subfluir embora a massa ao
+            # redor do modo seja material. A mesma recursão em log preserva essa massa.
+            log_distribution = np.full(max_n + 1, -np.inf, dtype=np.float64)
+            log_distribution[0] = log_a0
+            log_epsilon = np.log(epsilon_by_band)
+            for n in range(1, max_n + 1):
+                eligible = severity_bands <= n
+                v = severity_bands[eligible]
+                previous = log_distribution[n - v]
+                finite = np.isfinite(previous)
+                if np.any(finite):
+                    log_distribution[n] = (
+                        logsumexp(log_epsilon[eligible][finite] + previous[finite])
+                        - np.log(n)
+                    )
+            return np.exp(log_distribution)
+
+        distribution[0] = np.exp(log_a0)
+        for n in range(1, max_n + 1):
+            eligible = severity_bands <= n
+            v = severity_bands[eligible]
+            if v.size:
+                distribution[n] = np.dot(epsilon_by_band[eligible], distribution[n - v]) / n
+        return distribution
+
+    beta = params.beta
+    # Forma numericamente estável da recursão da eq. 79. Ela evita multiplicar
+    # alpha -> infinito por p -> 0 quando a volatilidade é muito pequena.
+    shared_factor = 1.0 / (1.0 + beta)  # alpha*p/mu
+    residual_factor = beta / (mu * (1.0 + beta))  # p/mu
+    log_a0 = -(mu / beta) * np.log1p(beta)
+    if log_a0 < -700.0:
+        log_distribution = np.full(max_n + 1, -np.inf, dtype=np.float64)
+        log_distribution[0] = log_a0
+        for n in range(1, max_n + 1):
+            eligible = severity_bands <= n
+            v = severity_bands[eligible]
+            if v.size:
+                coefficient = epsilon_by_band[eligible] * (
+                    shared_factor + residual_factor * (n / v - 1.0)
+                )
+                previous = log_distribution[n - v]
+                finite = np.isfinite(previous) & (coefficient > 0)
+                if np.any(finite):
+                    log_distribution[n] = (
+                        logsumexp(np.log(coefficient[finite]) + previous[finite])
+                        - np.log(n)
+                    )
+        return np.exp(log_distribution)
+
+    distribution[0] = np.exp(log_a0)
+
+    for n in range(1, max_n + 1):
+        eligible = severity_bands <= n
+        v = severity_bands[eligible]
+        if v.size:
+            coefficient = epsilon_by_band[eligible] * (
+                shared_factor + residual_factor * (n / v - 1.0)
+            )
+            distribution[n] = np.dot(coefficient, distribution[n - v]) / n
+    return distribution
 
 
 def _sector_distribution(
@@ -51,176 +313,128 @@ def _sector_distribution(
     unit_size: float,
     max_n: int,
 ) -> np.ndarray:
+    """Compatibilidade interna: calcula a PMF de um único fator sistemático."""
+
+    bands, exact_bands = _band_portfolio(net_exposures, unit_size)
+    params, epsilons = _sector_parameters(
+        exact_bands,
+        bands,
+        mean_default_rates,
+        std_default_rates,
+        sector_weights,
+        np.ones(len(net_exposures), dtype=np.float64),
+    )
+    return _sector_distribution_from_bands(bands, epsilons, params, max_n)
+
+
+def _convolve_truncated(left: np.ndarray, right: np.ndarray, max_n: int) -> np.ndarray:
+    """Multiplica PGFs por FFT e conserva apenas o suporte solicitado."""
+
+    convolution = fftconvolve(left, right)[: max_n + 1]
+    # FFT pode gerar resíduos negativos da ordem de 1e-17. Eles não representam
+    # probabilidades e são removidos sem renormalizar a massa de cauda.
+    convolution[np.abs(convolution) < 1e-15] = 0.0
+    if np.any(convolution < -1e-12):
+        raise FloatingPointError("A convolução gerou probabilidade negativa material.")
+    return np.maximum(convolution, 0.0)
+
+
+def calculate_loss_distribution_detailed(
+    exposures,
+    mean_default_rates,
+    std_default_rates,
+    recovery_rates,
+    sector_weights_matrix=None,
+    idiosyncratic_sector_indices: Sequence[int] | None = None,
+    unit_size: float | None = None,
+    max_loss_dollars: float = 150_000_000,
+    obligor_counts=None,
+) -> LossDistributionResult:
+    """Calcula a distribuição e expõe seus diagnósticos numéricos.
+
+    Setores listados em ``idiosyncratic_sector_indices`` seguem A12.3: sua
+    variância de fator é fixada em zero. Isso representa o limite de muitos
+    fatores específicos independentes, exatamente como prescrito no manual.
+    ``obligor_counts`` comprime grupos de contratos com parâmetros idênticos e
+    é algebricamente equivalente a repetir cada linha o número indicado.
     """
-    Calcula a PMF de perdas para um único setor sistemático (fator compartilhado).
 
-    Parâmetros
-    ----------
-    net_exposures : array (N,)
-        Exposições líquidas (descontada recuperação) do portfólio inteiro.
-    mean_default_rates : array (N,)
-        Taxa média de default por contraparte.
-    std_default_rates : array (N,)
-        Desvio padrão da taxa de default por contraparte.
-    sector_weights : array (N,)
-        Peso de cada contraparte neste setor (θ_Ak ∈ [0,1]).
-    unit_size : float
-        Tamanho da unidade L de perda.
-    max_n : int
-        Número máximo de unidades L a calcular.
+    (
+        exposures,
+        mean_rates,
+        std_rates,
+        recoveries,
+        weights,
+        idiosyncratic,
+        counts,
+    ) = _validate_inputs(
+        exposures,
+        mean_default_rates,
+        std_default_rates,
+        recovery_rates,
+        sector_weights_matrix,
+        idiosyncratic_sector_indices,
+        obligor_counts,
+    )
 
-    Retorna
-    -------
-    A : np.ndarray de tamanho (max_n+1,)
-        A[n] = P(perda do setor = n · L).
-    """
-    mask = sector_weights > 0
-    if not mask.any():
-        A = np.zeros(max_n + 1)
-        A[0] = 1.0
-        return A
+    net_exposures = exposures * (1.0 - recoveries)
+    positive_loss = net_exposures > 0
+    if not np.any(positive_loss):
+        raise ValueError("Ao menos uma exposição após recuperação deve ser positiva.")
 
-    w = sector_weights[mask]
-    net_e = net_exposures[mask]       # exposição TOTAL (não escalada pelo peso)
-    p = mean_default_rates[mask]
-    s = std_default_rates[mask]
+    if unit_size is None:
+        unit_size = _compute_unit_size(net_exposures)
+    unit_size = float(unit_size)
+    if not np.isfinite(unit_size) or unit_size <= 0:
+        raise ValueError("unit_size deve ser finito e positivo.")
+    if not np.isfinite(max_loss_dollars) or max_loss_dollars <= 0:
+        raise ValueError("max_loss_dollars deve ser finito e positivo.")
 
-    # Banda: ceil(E_A / L) — baseada na exposição TOTAL (não no peso setorial)
-    # Todas as contrapartes usam a mesma banda independentemente do setor (Apêndice A9)
-    exact_bands = net_e / unit_size
-    bands = np.maximum(np.ceil(exact_bands).astype(int), 1)
+    max_n = int(np.floor(max_loss_dollars / unit_size))
+    if max_n < 1:
+        raise ValueError("max_loss_dollars deve comportar ao menos uma unidade de perda.")
 
-    # ε_A^k = θ_Ak · p_A · E_A / L  (épsilon escalado pelo peso setorial)
-    epsilons = net_e * p * w / unit_size
+    bands, exact_bands = _band_portfolio(net_exposures, unit_size)
+    total = np.array([1.0], dtype=np.float64)
+    sector_parameters: list[SectorParameters] = []
 
-    # μ_k = Σ θ_Ak · ε_A / v_A  (eq. 38/96)
-    mu_k = (epsilons / bands).sum()
-    if mu_k <= 0:
-        A = np.zeros(max_n + 1)
-        A[0] = 1.0
-        return A
+    for sector_index in range(weights.shape[1]):
+        sector_std = std_rates.copy()
+        if sector_index in idiosyncratic:
+            # A12.3: o setor específico perde sua volatilidade sistemática.
+            sector_std.fill(0.0)
+        params, epsilons = _sector_parameters(
+            exact_bands,
+            bands,
+            mean_rates,
+            sector_std,
+            weights[:, sector_index],
+            counts,
+        )
+        sector_parameters.append(params)
+        sector_pmf = _sector_distribution_from_bands(bands, epsilons, params, max_n)
+        total = _convolve_truncated(total, sector_pmf, max_n)
 
-    # σ_k efetivo = Σ θ_Ak · σ_A · (E_A/L) / v_A  (preserva CV por contraparte)
-    sigma_k = (s * w * exact_bands / bands).sum()
+    mass = float(np.sum(total))
+    if mass > 1.0 and mass - 1.0 < 1e-11:
+        # Corrige somente erro de soma no último bit; não redistribui a cauda.
+        total[0] -= mass - 1.0
+        mass = float(np.sum(total))
+    if mass > 1.0 + 1e-11:
+        raise FloatingPointError(f"A PMF soma {mass:.12f}, acima de 1.")
 
-    if sigma_k > 0:
-        alpha_k = mu_k ** 2 / sigma_k ** 2
-        beta_k  = sigma_k ** 2 / mu_k
-        p_k     = beta_k / (1.0 + beta_k)
-    else:
-        alpha_k = np.inf
-        p_k     = 0.0
+    losses = np.arange(total.size, dtype=np.float64) * unit_size
+    exact_el = float(np.dot(net_exposures * mean_rates, counts))
+    truncated_el = float(np.dot(losses, total))
 
-    A = np.zeros(max_n + 1, dtype=np.float64)
-
-    if p_k > 0:
-        A[0] = (1.0 - p_k) ** alpha_k
-        for n in range(1, max_n + 1):
-            s_val = 0.0
-            for vj, ej in zip(bands, epsilons):
-                if vj <= n:
-                    s_val += ej * (alpha_k - 1.0 + n / vj) * A[n - vj]
-            A[n] = (p_k / (n * mu_k)) * s_val
-    else:
-        # Poisson puro (fallback σ = 0)
-        total_eps = epsilons.sum()
-        A[0] = np.exp(-total_eps) if total_eps < 700 else 0.0
-        for n in range(1, max_n + 1):
-            s_val = 0.0
-            for vj, ej in zip(bands, epsilons):
-                if vj <= n:
-                    s_val += ej * A[n - vj]
-            A[n] = s_val / n
-
-    total = A.sum()
-    if total > 0:
-        A /= total
-    return A
-
-
-def _idiosyncratic_sector_distribution(
-    net_exposures: np.ndarray,
-    mean_default_rates: np.ndarray,
-    sector_weights: np.ndarray,
-    unit_size: float,
-    max_n: int,
-) -> np.ndarray:
-    """
-    Calcula a PMF de perdas para o setor idiossincrático (Specific sector).
-
-    No setor específico, cada contraparte possui seu próprio fator Gamma
-    independente (α_A = 4 para CV = 0,5). A PMF do setor é a convolução
-    das 25 distribuições NB individuais (Seção A12 do Apêndice A).
-
-    Diferença do setor sistemático: não há fator compartilhado; cada
-    contraparte contribui de forma independente.
-
-    Parâmetros
-    ----------
-    net_exposures : array (N,)
-        Exposições líquidas do portfólio inteiro.
-    mean_default_rates : array (N,)
-        Taxa média de default por contraparte.
-    sector_weights : array (N,)
-        Peso de cada contraparte neste setor (θ_Ak ∈ [0,1]).
-    unit_size : float
-        Tamanho da unidade L de perda.
-    max_n : int
-        Número máximo de unidades L a calcular.
-
-    Retorna
-    -------
-    A : np.ndarray de tamanho (max_n+1,)
-        A[n] = P(perda do setor = n · L).
-    """
-    mask = sector_weights > 0
-    if not mask.any():
-        A = np.zeros(max_n + 1)
-        A[0] = 1.0
-        return A
-
-    w = sector_weights[mask]
-    net_e = net_exposures[mask]
-    p = mean_default_rates[mask]
-
-    exact_bands = net_e / unit_size
-    bands = np.maximum(np.ceil(exact_bands).astype(int), 1)
-    epsilons = net_e * p * w / unit_size
-    mus = epsilons / bands  # μ_A = θ_A · p_A · (E_A/L) / ceil(E_A/L)
-
-    # Começa com distribuição degenerada em 0 e convolui contraparte por contraparte
-    A = np.zeros(max_n + 1, dtype=np.float64)
-    A[0] = 1.0
-
-    for mu_a, v_a in zip(mus, bands):
-        if mu_a <= 0:
-            continue
-        # NB individual com α=4: p_a = 0,25·μ / (1 + 0,25·μ), β = 0,25·μ
-        beta_a = 0.25 * mu_a
-        p_a = beta_a / (1.0 + beta_a)
-
-        # PMF NB para esta contraparte: suporte em {0, v_a, 2·v_a, ...}
-        # Recursão: A[k·v_a] = p_a · (3+k)/k · A[(k-1)·v_a]
-        A_indiv = np.zeros(max_n + 1, dtype=np.float64)
-        A_indiv[0] = (1.0 - p_a) ** 4
-        for kk in range(1, max_n // v_a + 1):
-            n_idx = kk * v_a
-            if n_idx > max_n:
-                break
-            A_indiv[n_idx] = p_a * (3 + kk) / kk * A_indiv[n_idx - v_a]
-
-        # Normaliza antes de convolucionar para evitar acúmulo de erros de truncamento
-        t = A_indiv.sum()
-        if t > 0:
-            A_indiv /= t
-
-        conv = np.convolve(A, A_indiv)
-        A = conv[:max_n + 1]
-
-    total = A.sum()
-    if total > 0:
-        A /= total
-    return A
+    return LossDistributionResult(
+        pmf=total,
+        unit_size=unit_size,
+        expected_loss=exact_el,
+        pmf_expected_loss=truncated_el,
+        tail_mass_upper_bound=max(0.0, 1.0 - mass),
+        sector_parameters=tuple(sector_parameters),
+    )
 
 
 def calculate_loss_distribution(
@@ -229,90 +443,29 @@ def calculate_loss_distribution(
     std_default_rates,
     recovery_rates,
     sector_weights_matrix=None,
-    idiosyncratic_sector_indices=None,
-    unit_size: float = None,
+    idiosyncratic_sector_indices: Sequence[int] | None = None,
+    unit_size: float | None = None,
     max_loss_dollars: float = 150_000_000,
+    obligor_counts=None,
 ) -> tuple[np.ndarray, float]:
+    """API histórica: retorna ``(pmf, perda_esperada_exata)``.
+
+    Para auditoria de truncamento e parâmetros setoriais, prefira
+    :func:`calculate_loss_distribution_detailed`.
     """
-    Calcula a distribuição de perdas pelo modelo Credit Risk+ (Binomial Negativa).
 
-    Parâmetros
-    ----------
-    exposures : array_like
-        Exposições brutas em dólares.
-    mean_default_rates : array_like
-        Taxa média de default por contraparte (0–1).
-    std_default_rates : array_like
-        Desvio padrão da taxa de default por contraparte (0–1).
-    recovery_rates : array_like
-        Taxa de recuperação por contraparte (0–1).
-    sector_weights_matrix : array_like (N, K) ou None
-        Matriz de pesos setoriais θ_Ak. Cada linha soma a 1.
-        None = portfólio com setor único (todos os pesos = 1).
-    idiosyncratic_sector_indices : list[int] ou None
-        Índices de colunas em sector_weights_matrix que representam setores
-        idiossincráticos (e.g., [0] para o setor "Specific" do Exemplo 3).
-        Esses setores usam convolução de NB individuais por contraparte
-        em vez do NB de fator compartilhado.
-    unit_size : float ou None
-        Tamanho da unidade L de perda. None = ceil(max_exposure / 100).
-    max_loss_dollars : float
-        Perda máxima a calcular.
-
-    Retorna
-    -------
-    pmf : np.ndarray
-        A[n] = P(perda total = n · L) para n = 0, 1, …
-    el : float
-        Perda esperada em dólares (= Σ n·L·A[n]).
-    """
-    exposures          = np.asarray(exposures,          dtype=float)
-    mean_default_rates = np.asarray(mean_default_rates, dtype=float)
-    std_default_rates  = np.asarray(std_default_rates,  dtype=float)
-    recovery_rates     = np.asarray(recovery_rates,     dtype=float)
-
-    net_exposures = exposures * (1.0 - recovery_rates)
-
-    if unit_size is None:
-        unit_size = _compute_unit_size(net_exposures)
-
-    max_n = int(max_loss_dollars / unit_size)
-
-    idio_set = set(idiosyncratic_sector_indices or [])
-
-    if sector_weights_matrix is None:
-        weights_single = np.ones(len(exposures))
-        A = _sector_distribution(
-            net_exposures, mean_default_rates, std_default_rates,
-            weights_single, unit_size, max_n,
-        )
-    else:
-        sector_weights_matrix = np.asarray(sector_weights_matrix, dtype=float)
-        n_sectors = sector_weights_matrix.shape[1]
-
-        A = np.array([1.0])
-        for k in range(n_sectors):
-            w_k = sector_weights_matrix[:, k]
-            if k in idio_set:
-                A_k = _idiosyncratic_sector_distribution(
-                    net_exposures, mean_default_rates, w_k, unit_size, max_n,
-                )
-            else:
-                A_k = _sector_distribution(
-                    net_exposures, mean_default_rates, std_default_rates,
-                    w_k, unit_size, max_n,
-                )
-            conv = np.convolve(A, A_k)
-            A = conv[:max_n + 1]
-
-        total = A.sum()
-        if total > 0:
-            A /= total
-
-    loss_values = np.arange(len(A)) * unit_size
-    el = (loss_values * A).sum()
-
-    return A, el
+    result = calculate_loss_distribution_detailed(
+        exposures=exposures,
+        mean_default_rates=mean_default_rates,
+        std_default_rates=std_default_rates,
+        recovery_rates=recovery_rates,
+        sector_weights_matrix=sector_weights_matrix,
+        idiosyncratic_sector_indices=idiosyncratic_sector_indices,
+        unit_size=unit_size,
+        max_loss_dollars=max_loss_dollars,
+        obligor_counts=obligor_counts,
+    )
+    return result.pmf, result.expected_loss
 
 
 def calculate_loss_distribution_simple(
@@ -320,51 +473,115 @@ def calculate_loss_distribution_simple(
     mean_default_rates,
     std_default_rates,
     recovery_rates,
-    unit_size: float = None,
-    max_units: int = None,
+    unit_size: float | None = None,
+    max_units: int | None = None,
 ) -> tuple[np.ndarray, float]:
-    """Alias para calculate_loss_distribution (retrocompatibilidade)."""
-    if max_units is not None and unit_size is not None:
-        max_loss_dollars = max_units * unit_size
+    """Alias retrocompatível para portfólios de um único setor."""
+
+    if max_units is None:
+        max_loss = 150_000_000
     else:
-        max_loss_dollars = 150_000_000
+        effective_unit = unit_size
+        if effective_unit is None:
+            gross = _as_float_vector(exposures, "exposures")
+            recoveries = _as_float_vector(recovery_rates, "recovery_rates")
+            effective_unit = _compute_unit_size(gross * (1.0 - recoveries))
+        max_loss = float(max_units) * float(effective_unit)
     return calculate_loss_distribution(
-        exposures=exposures,
-        mean_default_rates=mean_default_rates,
-        std_default_rates=std_default_rates,
-        recovery_rates=recovery_rates,
+        exposures,
+        mean_default_rates,
+        std_default_rates,
+        recovery_rates,
         unit_size=unit_size,
-        max_loss_dollars=max_loss_dollars,
+        max_loss_dollars=max_loss,
     )
 
 
-# ── Teste básico ──────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    import sys
-    sys.path.insert(0, '.')
-    from data import create_example_1a_portfolio
+def loss_quantile(
+    pmf: Iterable[float],
+    confidence: float,
+    unit_size: float,
+    *,
+    interpolate: bool = False,
+) -> float:
+    """Calcula um quantil discreto ou a interpolação usada pelo XLS oficial."""
 
-    portfolio = create_example_1a_portfolio()
-    A, el = calculate_loss_distribution(
-        exposures=portfolio["exposure"].values,
-        mean_default_rates=portfolio["mean_default_rate"].values,
-        std_default_rates=portfolio["std_default_rate"].values,
-        recovery_rates=np.zeros(len(portfolio)),
+    probabilities = _as_float_vector(pmf, "pmf")
+    if np.any(probabilities < -1e-14):
+        raise ValueError("A PMF contém probabilidades negativas.")
+    if not 0 < confidence < 1:
+        raise ValueError("confidence deve pertencer ao intervalo aberto (0, 1).")
+    if unit_size <= 0:
+        raise ValueError("unit_size deve ser positivo.")
+
+    cdf = np.cumsum(np.maximum(probabilities, 0.0))
+    if cdf[-1] + 1e-12 < confidence:
+        raise ValueError(
+            f"Domínio truncado: a CDF termina em {cdf[-1]:.8f}, abaixo de {confidence:.8f}."
+        )
+    index = int(np.searchsorted(cdf, confidence, side="left"))
+    if not interpolate or index == 0:
+        return index * float(unit_size)
+
+    lower_probability = cdf[index - 1]
+    upper_probability = cdf[index]
+    if upper_probability <= lower_probability:
+        return index * float(unit_size)
+    fraction = (confidence - lower_probability) / (upper_probability - lower_probability)
+    return (index - 1 + fraction) * float(unit_size)
+
+
+def analytic_loss_moments(
+    exposures,
+    mean_default_rates,
+    std_default_rates,
+    recovery_rates,
+    sector_weights_matrix=None,
+    idiosyncratic_sector_indices: Sequence[int] | None = None,
+    unit_size: float | None = None,
+    obligor_counts=None,
+) -> tuple[float, float]:
+    """Retorna média e variância analíticas das equações 115--118, em moeda."""
+
+    (
+        exposures,
+        mean_rates,
+        std_rates,
+        recoveries,
+        weights,
+        idiosyncratic,
+        counts,
+    ) = _validate_inputs(
+        exposures,
+        mean_default_rates,
+        std_default_rates,
+        recovery_rates,
+        sector_weights_matrix,
+        idiosyncratic_sector_indices,
+        obligor_counts,
     )
+    net = exposures * (1.0 - recoveries)
+    if unit_size is None:
+        unit_size = _compute_unit_size(net)
+    bands, exact_bands = _band_portfolio(net, float(unit_size))
 
-    net_e = portfolio["exposure"].values
-    L = float(np.ceil(net_e.max() / 100))
-    cdf = np.cumsum(A)
+    epsilon_obligor = counts * mean_rates * exact_bands
+    variance_units = float(np.dot(epsilon_obligor, bands))
+    for sector_index in range(weights.shape[1]):
+        sector_std = std_rates.copy()
+        if sector_index in idiosyncratic:
+            sector_std.fill(0.0)
+        params, _ = _sector_parameters(
+            exact_bands,
+            bands,
+            mean_rates,
+            sector_std,
+            weights[:, sector_index],
+            counts,
+        )
+        if params.mean_defaults > 0:
+            ratio = params.std_defaults / params.mean_defaults
+            variance_units += params.expected_loss_units**2 * ratio**2
 
-    def var_interp(cdf, pct, L):
-        idx = np.searchsorted(cdf, pct / 100)
-        if idx == 0: return 0.0
-        p_lo, p_hi = cdf[idx - 1], cdf[idx]
-        frac = (pct / 100 - p_lo) / (p_hi - p_lo) if p_hi > p_lo else 0.0
-        return (idx - 1 + frac) * L
-
-    print(f"E[Loss] = ${el:,.0f}  (ref: $14,221,863)")
-    for pct, ref in [(99, 55_311_503), (99.5, 62_033_181)]:
-        val = var_interp(cdf, pct, L)
-        err = (val - ref) / ref * 100
-        print(f"  VaR({pct}%) = ${val:,.0f}  ref=${ref:,.0f}  err={err:+.3f}%")
+    expected_loss = float(np.dot(net * mean_rates, counts))
+    return expected_loss, variance_units * float(unit_size) ** 2

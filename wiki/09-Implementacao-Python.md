@@ -14,8 +14,9 @@ creditriskplus/
 ├── simple_model.py       # Implementação principal (recursão NB)
 ├── data.py               # Dados dos exemplos e tabelas de rating
 ├── plots.py              # Utilitários de visualização
-├── model.py              # Modelo alternativo
-└── variable_model.py     # Extensões variáveis
+├── model.py              # Fachada OO sobre o mesmo núcleo
+├── retail.py             # Simulação PF por safras e multiplicidades
+└── variable_model.py     # Compatibilidade com a API antiga
 ```
 
 ### 1.1 `simple_model.py`
@@ -24,8 +25,9 @@ Contém a função principal `calculate_loss_distribution` e funções auxiliare
 
 - Cálculo da unidade de perda $L$.
 - Distribuição de um setor sistemático (fator Gama compartilhado).
-- Distribuição do setor idiossincrático (convolução de NBs individuais).
-- Convolução de setores.
+- Limite Poisson do setor específico, conforme A12.3.
+- Convolução FFT dos setores sem renormalização da cauda truncada.
+- Momentos analíticos, quantis discretos e diagnósticos de truncamento.
 
 ### 1.2 `data.py`
 
@@ -126,20 +128,7 @@ for n in range(1, max_n + 1):
 
 ### 3.2 Setor idiossincrático
 
-A função `_idiosyncratic_sector_distribution` implementa a convolução de NBs individuais com $\alpha_A = 4$:
-
-```python
-beta_a = 0.25 * mu_a
-p_a = beta_a / (1.0 + beta_a)
-
-A_indiv[0] = (1.0 - p_a) ** 4
-for kk in range(1, max_n // v_a + 1):
-    n_idx = kk * v_a
-    A_indiv[n_idx] = p_a * (3 + kk) / kk * A_indiv[n_idx - v_a]
-
-conv = np.convolve(A, A_indiv)
-A = conv[:max_n + 1]
-```
+Conforme a Seção A12.3, o setor específico usa os pesos informados para a média, mas sua volatilidade setorial é fixada em zero. Ele é então calculado pelo limite Poisson da Seção A11. Esse limite representa muitos subfatores específicos independentes sem criar uma NB artificial por contraparte.
 
 ### 3.3 Multi-setor
 
@@ -149,11 +138,9 @@ A convolução de setores é feita iterativamente:
 A = np.array([1.0])
 for k in range(n_sectors):
     w_k = sector_weights_matrix[:, k]
-    if k in idio_set:
-        A_k = _idiosyncratic_sector_distribution(...)
-    else:
-        A_k = _sector_distribution(...)
-    conv = np.convolve(A, A_k)
+    sector_std = np.zeros_like(std_rates) if k in idio_set else std_rates
+    A_k = _sector_distribution(..., sector_std, ...)
+    conv = scipy.signal.fftconvolve(A, A_k)
     A = conv[:max_n + 1]
 ```
 
@@ -233,7 +220,8 @@ Abrir o notebook `notebooks/04_exemplo_1A.ipynb` para verificar a reprodução d
 A implementação segue fielmente o paper, com as seguintes observações:
 
 - A banda $\nu_A$ é calculada com a exposição total, mesmo em setores fracionários, conforme o Apêndice A9.
-- O setor idiossincrático é implementado por convolução de NBs individuais com $\alpha_A = 4$, conforme a Seção A12.
+- O setor idiossincrático tem $\sigma_{specific}=0$, conforme a Seção A12.3.
+- A massa além de `max_loss_dollars` é reportada, nunca redistribuída por normalização.
 - O truncamento em `max_loss_dollars` é uma necessidade computacional; o paper não discute truncamento explicitamente.
 
 ---

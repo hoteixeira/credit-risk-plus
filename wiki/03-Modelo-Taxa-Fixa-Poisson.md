@@ -343,8 +343,8 @@ Portanto, a recursão (25) continua válida, bastando tratar cada par $(j, t)$ c
 A recursão de taxa fixa está implementada no fallback do módulo `creditriskplus.simple_model`:
 
 ```python
-# Caso Poisson puro (sigma = 0)
-A[0] = np.exp(-total_eps)
+# Caso Poisson puro (sigma = 0): mu = sum(epsilon_j / nu_j)
+A[0] = np.exp(-mu)
 for n in range(1, max_n + 1):
     s_val = 0.0
     for vj, ej in zip(bands, epsilons):

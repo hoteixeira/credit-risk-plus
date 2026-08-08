@@ -24,25 +24,19 @@ A planilha `references/CreditRisk+.xls` contém os exemplos numéricos originais
 | 1B | 23 contrapartes | \$11.162.856 | \$39.946.857 | 0,000% | 0,000% |
 | 1C | 25 contrapartes, 3 anos | \$17.277.632 | \$62.100.307 | 0,000% | 0,000% |
 | 2 | 3 setores geográficos | \$14.221.863 | \$49.931.502 | 0,000% | 0,000% |
-| 3 | 4 setores + específico | \$14.221.863 | \$47.368.235 | 0,000% | +0,579% |
+| 3 | 4 setores + específico | \$14.221.863 | \$47.368.235 | 0,000% | 0,000% |
 
 ---
 
 ## 3. Interpretação dos Erros
 
-### 3.1 Casos exatos (1A, 1B, 1C, 2)
+### 3.1 Casos anuais exatos (1A, 1B, 2 e 3)
 
-Nos exemplos 1A, 1B, 1C e 2, os erros são menores que 0,001%, considerando a precisão de ponto flutuante e arredondamentos da planilha.
+Nos quatro exemplos anuais, a diferença é inferior a uma unidade monetária para a EL e para o VaR interpolado segundo a convenção do XLS.
 
-### 3.2 Exemplo 3: erro de +0,579%
+### 3.2 Exemplo 3: setor específico
 
-O Exemplo 3 envolve o setor idiossincrático (*Specific Sector*), cuja implementação na planilha original depende de detalhes do código VBA não publicados. A implementação deste repositório:
-
-- Usa $\alpha_A = 4$ para cada contraparte no setor específico.
-- Calcula a PMF do setor por convolução de NBs individuais.
-- É matematicamente consistente com a Seção A12 do paper.
-
-O erro de +0,579% no VaR(99%) é o melhor resultado obtido sem acesso ao código VBA original. A perda esperada (EL) permanece exata.
+O Exemplo 3 é reproduzido ao aplicar diretamente A12.3: o setor específico conserva sua contribuição de média, mas recebe variância zero e converge ao caso Poisson de A11. A hipótese anterior de NBs individuais com $\alpha_A=4$ não consta do manual e foi removida.
 
 ---
 
@@ -51,9 +45,9 @@ O erro de +0,579% no VaR(99%) é o melhor resultado obtido sem acesso ao código
 | Fonte | Impacto |
 |-------|---------|
 | Arredondamento de bandas ($\nu_A$) | Pequeno; controlado pela escolha de $L$ |
-| Truncamento da distribuição (`max_loss_dollars`) | Pequeno se a cauda for finita |
-| Normalização das PMFs após truncamento | Menor que 0,001% nos exemplos testados |
-| Implementação do setor específico | Principal fonte no Exemplo 3 |
+| Truncamento da distribuição (`max_loss_dollars`) | Mensurado por `tail_mass_upper_bound` |
+| Normalização das PMFs após truncamento | Não realizada; evita distorção de momentos e quantis |
+| Implementação do setor específico | Variância zero, conforme A12.3 |
 | Precisão da planilha Excel | Limitada ao formato numérico do Excel |
 
 ---
@@ -65,7 +59,7 @@ Os scripts de teste verificam:
 1. Reprodução dos valores de EL e VaR dos exemplos.
 2. Convergência do modelo NB para o modelo Poisson quando $\sigma \to 0$.
 3. Aditividade das contribuições de risco.
-4. Soma da PMF igual a 1.
+4. Massa acumulada consistente com o limite de truncamento.
 5. Execução sem erros dos notebooks.
 
 Para executar todos os testes:
@@ -85,4 +79,4 @@ Todos os resultados são determinísticos para um dado conjunto de inputs. A sem
 
 ## 7. Conclusão
 
-A implementação reproduz os resultados oficiais com alta precisão. As eventuais discrepâncias são explicáveis por escolhas de implementação numericamente equivalentes ou por limitações de acesso ao código original da planilha.
+A implementação reproduz os exemplos anuais oficiais com precisão subunitária. O caso multi-ano exige hipóteses adicionais sobre dependência temporal e, por isso, deve ser validado separadamente da regressão anual.

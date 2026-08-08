@@ -135,68 +135,22 @@ Na alocação com pesos fracionários, parte do risco de cada contraparte pode n
 
 ### 6.2 Modelagem como setor específico
 
-O paper propõe modelar o componente idiossincrático criando um setor adicional no qual cada contraparte tem seu **próprio fator Gama independente**. A convenção é fixar o coeficiente de variação em:
+A Seção A12.3 propõe um setor adicional para a parcela específica. Sua média conserva os pesos usuais,
 
 $$
-CV = \frac{\sigma_A}{\mu_A} = \frac{1}{\sqrt{\alpha_A}} = 0,5
+\mu_{specific}=\sum_A \theta_{A,specific}\frac{\varepsilon_A}{\nu_A},
 $$
 
-do que implica:
+mas, somente para esse setor, fixa-se $\sigma_{specific}=0$. Pela convergência de A11, ele se comporta como o limite de muitos sub-setores independentes, um por contraparte. Não se introduz $\alpha_A=4$ nem uma NB individual, pois isso acrescentaria volatilidade que A12.3 manda retirar.
 
-$$
-\alpha_A = 4
-$$
-
-### 6.3 Parâmetros do setor idiossincrático
-
-Para cada contraparte $A$ com peso $\theta_A > 0$ no setor específico:
-
-$$
-\mu_A = \theta_A \frac{\varepsilon_A}{\nu_A}
-$$
-
-$$
-\beta_A = \frac{\mu_A}{\alpha_A} = \frac{\mu_A}{4}
-$$
-
-$$
-p_A = \frac{\beta_A}{1 + \beta_A}
-$$
-
-### 6.4 PMF individual e convolução
-
-A PMF de cada contraparte no setor específico é uma NB com suporte em $\{0, \nu_A, 2\nu_A, \dots\}$. A recursão escalar é:
-
-$$
-A_A[0] = (1 - p_A)^4
-$$
-
-$$
-A_A[k \cdot \nu_A] = p_A \frac{3 + k}{k} A_A[(k-1) \cdot \nu_A]
-$$
-
-A PMF do setor idiossincrático total é a convolução sequencial das PMFs individuais:
-
-$$
-\text{PMF}_{\text{idio}} = A_1 * A_2 * \dots * A_N
-$$
-
-### 6.5 Implementação Python
-
-A função `_idiosyncratic_sector_distribution` implementa essa convolução:
+### 6.3 Implementação Python
 
 ```python
-beta_a = 0.25 * mu_a
-p_a = beta_a / (1.0 + beta_a)
+sector_std = std_default_rates.copy()
+if sector_index in idiosyncratic_sector_indices:
+    sector_std.fill(0.0)
 
-A_indiv[0] = (1.0 - p_a) ** 4
-for kk in range(1, max_n // v_a + 1):
-    n_idx = kk * v_a
-    A_indiv[n_idx] = p_a * (3 + kk) / kk * A_indiv[n_idx - v_a]
-
-# Convolução sequencial
-conv = np.convolve(A, A_indiv)
-A = conv[:max_n + 1]
+A_k = _sector_distribution(..., std_default_rates=sector_std, ...)
 ```
 
 ---
@@ -275,5 +229,5 @@ Pela Seção A11, um setor com variância zero equivale ao limite de infinitos s
 | Volatilidade setorial | $\sigma_k = \sum_A \theta_{Ak} \sigma_A (E_A/L) / \nu_A$ |
 | PGF total | $G(z) = \prod_k G_k(z)$ |
 | Convolução | $\text{PMF}_{\text{total}} = *_k \text{PMF}_k$ |
-| Setor idiossincrático | $\alpha_A = 4$ (CV = 0,5) |
+| Setor idiossincrático | $\sigma_{specific}=0$ (limite Poisson de A11) |
 | Correlação pareada | $\rho_{AB} \approx \sqrt{\mu_A \mu_B} \sum_k \theta_{Ak}\theta_{Bk}(\sigma_k/\mu_k)^2$ |
