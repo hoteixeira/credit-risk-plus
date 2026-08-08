@@ -148,7 +148,7 @@ for k in range(n_sectors):
 
 ## 4. Notebooks Educacionais
 
-A pasta `notebooks/` contém 10 notebooks que cobrem o modelo passo a passo:
+A pasta `notebooks/` contém nove notebooks validados que cobrem o modelo passo a passo:
 
 | Notebook | Conteúdo |
 |----------|----------|
@@ -160,8 +160,9 @@ A pasta `notebooks/` contém 10 notebooks que cobrem o modelo passo a passo:
 | `06_exemplo_1C_multi_ano.ipynb` | Horizonte de 3 anos com contrapartes virtuais |
 | `07_exemplo_2_setores_geo.ipynb` | 3 setores geográficos exclusivos |
 | `08_exemplo_3_setores_fracionarios.ipynb` | 4 setores com pesos fracionários + setor específico |
-| `09_aplicacoes.ipynb` | ACP, ICR, limites, stress testing, RARoC |
-| `10_simulacao_portfolio_varejo.ipynb` | 1M clientes × 24 meses com Markov e choque macro |
+| `11_safras_pf_brasil_creditriskplus.ipynb` | Backbook PF maduro, 24 novas safras acompanhadas até MOB 60 |
+
+O parecer individual e os controles de cada arquivo estão em `notebooks/README.md`.
 
 ---
 

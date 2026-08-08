@@ -173,8 +173,8 @@ credit-risk-plus/
 │   ├── 06_exemplo_1C_multi_ano.ipynb
 │   ├── 07_exemplo_2_setores_geo.ipynb
 │   ├── 08_exemplo_3_setores_fracionarios.ipynb
-│   ├── 09_aplicacoes.ipynb
-│   └── 10_simulacao_portfolio_varejo.ipynb
+│   ├── 11_safras_pf_brasil_creditriskplus.ipynb
+│   └── README.md              # Matriz de validação
 └── wiki/                      # Esta documentação
 ```
 

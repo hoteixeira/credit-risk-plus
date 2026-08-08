@@ -230,7 +230,7 @@ var_99 = idx_99 * unit_size
 ec_99 = var_99 - el
 ```
 
-As contribuições de risco são implementadas no notebook `09_aplicacoes.ipynb`.
+As contribuições das Equações A121 e A102 são implementadas na classe `CreditRiskPlus` e demonstradas no notebook `04_exemplo_1A.ipynb`. A contribuição ao desvio padrão é aditiva; a contribuição ao percentil é a aproximação proposta pelo manual e não deve ser confundida com o efeito finito de remover uma exposição.
 
 ---
 

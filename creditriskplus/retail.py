@@ -29,29 +29,83 @@ SECTOR_COLUMNS = (
     "sector_weight_installment",
 )
 
+BASE_PD_12M = {
+    "Cartão de crédito": np.array([0.012, 0.035, 0.080, 0.180]),
+    "Crédito pessoal parcelado": np.array([0.018, 0.045, 0.100, 0.220]),
+}
+BASE_MIX = {
+    "Cartão de crédito": np.array([0.36, 0.34, 0.22, 0.08]),
+    "Crédito pessoal parcelado": np.array([0.30, 0.35, 0.25, 0.10]),
+}
+ANNUAL_CLOSURE = {
+    "Cartão de crédito": np.array([0.10, 0.11, 0.13, 0.16]),
+    "Crédito pessoal parcelado": np.array([0.12, 0.13, 0.15, 0.18]),
+}
+RECOVERY = {"Cartão de crédito": 0.15, "Crédito pessoal parcelado": 0.22}
+PD_CV = {"Cartão de crédito": 0.65, "Crédito pessoal parcelado": 0.55}
+
 
 @dataclass(frozen=True)
 class RetailSimulationConfig:
-    """Controles do cenário longitudinal; valores monetários estão em reais."""
+    """Controles do cenário longitudinal; valores monetários estão em reais.
 
-    start: str = "2022-01-01"
-    n_months: int = 36
-    warmup_months: int = 12
+    O backbook histórico cria a distribuição de idades de uma carteira madura.
+    Depois dele, ``burn_in_months`` permite verificar a estabilidade antes dos
+    ``reporting_months`` divulgados. Crescimento e choque são ancorados na data
+    de início do reporte e, portanto, não mudam quando o backbook é ampliado.
+    """
+
+    reporting_start: str = "2023-01-01"
+    reporting_months: int = 24
+    vintage_performance_months: int = 60
+    backbook_months: int = 180
+    burn_in_months: int = 12
     seed: int = 20260808
     average_monthly_card_originations: int = 150
     average_monthly_installment_originations: int = 110
+    annual_origination_growth: float = 0.05
+    shock_start_month: int = 6
     unit_size: float = 250.0
     tail_tolerance: float = 1e-8
+    max_pre_report_level_change: float = 0.08
+    max_pre_report_el_rate_change: float = 0.003
+    max_pre_report_mix_change: float = 0.03
+    max_pre_report_age_tv: float = 0.04
+
+    @property
+    def simulation_start(self) -> pd.Timestamp:
+        """Primeiro fechamento do burn-in, anterior ao início do reporte."""
+
+        return pd.Timestamp(self.reporting_start) - pd.DateOffset(months=self.burn_in_months)
+
+    @property
+    def n_months(self) -> int:
+        """Fechamentos necessários para maturar a última safra reportada."""
+
+        return (
+            self.burn_in_months
+            + self.reporting_months
+            + self.vintage_performance_months
+        )
 
 
-def _macro_multiplier(month_index: int) -> float:
-    """Ciclo sintético: sazonalidade, choque transitório e recuperação gradual."""
+def _macro_multiplier(
+    month: pd.Timestamp,
+    months_from_reporting_start: int,
+    config: RetailSimulationConfig,
+) -> float:
+    """Ciclo sintético ancorado no reporte, sem contaminar o backbook.
 
-    seasonal = 1.0 + 0.05 * np.sin(2.0 * np.pi * month_index / 12.0)
-    if 18 <= month_index <= 22:
-        shock = [1.15, 1.35, 1.65, 1.45, 1.25][month_index - 18]
-    elif 23 <= month_index <= 27:
-        shock = 1.0 + 0.18 * (28 - month_index) / 5.0
+    A sazonalidade depende do mês civil. O choque começa somente depois do
+    início do reporte; aumentar o histórico não desloca o cenário econômico.
+    """
+
+    seasonal = 1.0 + 0.05 * np.sin(2.0 * np.pi * (month.month - 1) / 12.0)
+    shock_offset = months_from_reporting_start - config.shock_start_month
+    if 0 <= shock_offset <= 4:
+        shock = [1.15, 1.35, 1.65, 1.45, 1.25][shock_offset]
+    elif 5 <= shock_offset <= 9:
+        shock = 1.0 + 0.18 * (10 - shock_offset) / 5.0
     else:
         shock = 1.0
     return float(seasonal * shock)
@@ -90,56 +144,171 @@ def _sector_weights(product: str) -> tuple[float, float, float, float]:
     return 0.15, 0.45, 0.0, 0.40
 
 
-def simulate_retail_portfolio(config: RetailSimulationConfig) -> pd.DataFrame:
-    """Gera o painel mensal de pools por safra, produto e faixa de risco.
+def _monthly_retention(product: str, risk_index: int, mob: int) -> float:
+    """Sobrevivência mensal neutra usada para reconstruir o backbook maduro."""
 
-    Defaults e saídas são simulados sequencialmente com uma semente fixa. A PD
-    usada pelo CreditRisk+ é prospectiva de 12 meses; os defaults realizados
-    usam a probabilidade mensal equivalente, o que evita confundir horizontes.
+    pd_12m = min(
+        BASE_PD_12M[product][risk_index] * _seasoning_multiplier(mob, product),
+        0.45,
+    )
+    monthly_pd = 1.0 - (1.0 - pd_12m) ** (1.0 / 12.0)
+    monthly_exit = 1.0 - (1.0 - ANNUAL_CLOSURE[product][risk_index]) ** (1.0 / 12.0)
+    return float((1.0 - monthly_pd) * (1.0 - monthly_exit))
+
+
+def _survival_probabilities(product: str, risk_index: int, max_age: int) -> np.ndarray:
+    """Retorna S[a], probabilidade de um contrato chegar ativo ao MOB ``a``."""
+
+    survival = np.ones(max_age + 1, dtype=float)
+    for age in range(1, max_age + 1):
+        survival[age] = survival[age - 1] * _monthly_retention(
+            product, risk_index, age - 1
+        )
+    return survival
+
+
+def _calendar_month_distance(month: pd.Timestamp, origin: pd.Timestamp) -> int:
+    """Diferença inteira em meses, sem depender do número de dias."""
+
+    return (month.year - origin.year) * 12 + month.month - origin.month
+
+
+def simulate_retail_portfolio(config: RetailSimulationConfig) -> pd.DataFrame:
+    """Gera painel mensal a partir de uma carteira inicial madura.
+
+    O estoque inicial contém safras históricas sobreviventes. Para cartão, a
+    parcela anterior ao histórico explícito é mantida em um pool de cauda já
+    plenamente maturado. Depois da abertura, defaults e saídas são simulados
+    sequencialmente. A PD do CreditRisk+ é prospectiva de 12 meses; eventos
+    realizados usam a probabilidade mensal equivalente.
     """
 
-    if config.n_months <= config.warmup_months:
-        raise ValueError("n_months deve ser maior que warmup_months.")
-    rng = np.random.default_rng(config.seed)
-    months = pd.date_range(config.start, periods=config.n_months, freq="MS")
+    reporting_start = pd.Timestamp(config.reporting_start)
+    if not reporting_start.is_month_start:
+        raise ValueError("reporting_start deve ser o primeiro dia de um mês.")
+    if config.reporting_months < 24:
+        raise ValueError("reporting_months deve ser pelo menos 24.")
+    if config.vintage_performance_months < 12:
+        raise ValueError("vintage_performance_months deve ser pelo menos 12.")
+    if config.backbook_months < 36:
+        raise ValueError("backbook_months deve ser pelo menos 36.")
+    if config.burn_in_months < 12:
+        raise ValueError("burn_in_months deve ser pelo menos 12.")
+    if config.annual_origination_growth <= -1.0:
+        raise ValueError("annual_origination_growth deve ser maior que -100%.")
+    if min(
+        config.average_monthly_card_originations,
+        config.average_monthly_installment_originations,
+    ) <= 0:
+        raise ValueError("As originações médias devem ser positivas.")
+    if config.unit_size <= 0.0 or not 0.0 < config.tail_tolerance < 1.0:
+        raise ValueError("unit_size e tail_tolerance devem ter domínios válidos.")
 
-    base_pd_12m = {
-        "Cartão de crédito": np.array([0.012, 0.035, 0.080, 0.180]),
-        "Crédito pessoal parcelado": np.array([0.018, 0.045, 0.100, 0.220]),
-    }
-    base_mix = {
-        "Cartão de crédito": np.array([0.36, 0.34, 0.22, 0.08]),
-        "Crédito pessoal parcelado": np.array([0.30, 0.35, 0.25, 0.10]),
-    }
+    # Fluxos independentes garantem que ampliar apenas o horizonte de vintage
+    # não reescreva defaults já realizados na janela reportada.
+    population_seed, event_seed = np.random.SeedSequence(config.seed).spawn(2)
+    population_rng = np.random.default_rng(population_seed)
+    event_rng = np.random.default_rng(event_seed)
+    months = pd.date_range(config.simulation_start, periods=config.n_months, freq="MS")
     average_originations = {
         "Cartão de crédito": config.average_monthly_card_originations,
         "Crédito pessoal parcelado": config.average_monthly_installment_originations,
     }
-    annual_closure = {
-        "Cartão de crédito": np.array([0.10, 0.11, 0.13, 0.16]),
-        "Crédito pessoal parcelado": np.array([0.12, 0.13, 0.15, 0.18]),
-    }
-    recovery = {"Cartão de crédito": 0.15, "Crédito pessoal parcelado": 0.22}
-    pd_cv = {"Cartão de crédito": 0.65, "Crédito pessoal parcelado": 0.55}
 
-    # Cada item acompanha um pool do nascimento até seu esgotamento.
+    # Reconstrói as safras anteriores à abertura. S[a] incorpora defaults e
+    # encerramentos neutros até o MOB a, preservando uma pirâmide de idades.
+    maximum_survival_age = max(config.backbook_months + 1, 1_200)
+    survival = {
+        (product, risk_index): _survival_probabilities(
+            product, risk_index, maximum_survival_age
+        )
+        for product in PRODUCTS
+        for risk_index in range(len(RISK_BANDS))
+    }
     pools: list[dict] = []
-    for cohort_index, cohort_month in enumerate(months):
-        macro_at_origination = _macro_multiplier(cohort_index)
+    for age in range(1, config.backbook_months + 1):
+        cohort_month = config.simulation_start - pd.DateOffset(months=age)
+        seasonal = 1.12 if cohort_month.month in (11, 12) else 1.0
         for product in PRODUCTS:
-            # A oferta contrai durante o choque e cresce suavemente fora dele.
-            growth = 1.0 + 0.006 * cohort_index
+            total = int(population_rng.poisson(average_originations[product] * seasonal))
+            originated = population_rng.multinomial(
+                total, BASE_MIX[product] / BASE_MIX[product].sum()
+            )
+            for risk_index, count in enumerate(originated):
+                active = int(
+                    population_rng.binomial(
+                        int(count), survival[(product, risk_index)][age]
+                    )
+                )
+                if active and _ead_per_obligor(product, risk_index, age, 1.0) > 0.0:
+                    pools.append(
+                        {
+                            "cohort_index": -age,
+                            "cohort_month": cohort_month,
+                            "product": product,
+                            "risk_band": RISK_BANDS[risk_index],
+                            "risk_index": risk_index,
+                            "originated_count": int(count),
+                            "active_count": active,
+                            "opening_backbook": True,
+                            "backbook_tail": False,
+                        }
+                    )
+
+    # Cartões anteriores ao histórico explícito não são descartados. Como EAD
+    # e seasoning já convergiram no MOB 180, a soma das sobrevivências antigas
+    # é um único pool homogêneo, sem aproximação adicional na PGF CreditRisk+.
+    for risk_index, risk_band in enumerate(RISK_BANDS):
+        mean_band_originations = (
+            average_originations["Cartão de crédito"]
+            * 1.02  # média anual da sazonalidade de novembro/dezembro
+            * BASE_MIX["Cartão de crédito"][risk_index]
+        )
+        tail_survival = survival[("Cartão de crédito", risk_index)][
+            config.backbook_months + 1 :
+        ].sum()
+        tail_active = int(round(mean_band_originations * tail_survival))
+        if tail_active:
+            tail_age = config.backbook_months + 1
+            pools.append(
+                {
+                    "cohort_index": -tail_age,
+                    "cohort_month": config.simulation_start
+                    - pd.DateOffset(months=tail_age),
+                    "product": "Cartão de crédito",
+                    "risk_band": risk_band,
+                    "risk_index": risk_index,
+                    "originated_count": tail_active,
+                    "active_count": tail_active,
+                    "opening_backbook": True,
+                    "backbook_tail": True,
+                }
+            )
+
+    # O burn-in usa volume estável. O crescimento comercial começa no reporte;
+    # alterar o tamanho do backbook não muda originação nem cenário macro.
+    for cohort_index, cohort_month in enumerate(months):
+        report_offset = _calendar_month_distance(cohort_month, reporting_start)
+        macro_at_origination = _macro_multiplier(cohort_month, report_offset, config)
+        for product in PRODUCTS:
+            growth_months = max(report_offset, 0)
+            growth = (1.0 + config.annual_origination_growth) ** (growth_months / 12.0)
             supply = 1.0 / (1.0 + 0.35 * max(macro_at_origination - 1.0, 0.0))
-            seasonal = 1.0 + (0.12 if cohort_month.month in (11, 12) else 0.0)
-            total = int(rng.poisson(average_originations[product] * growth * supply * seasonal))
+            seasonal = 1.12 if cohort_month.month in (11, 12) else 1.0
+            total = int(
+                population_rng.poisson(
+                    average_originations[product] * growth * supply * seasonal
+                )
+            )
 
             # Underwriting mais restritivo reduz D e eleva A durante o choque.
-            mix = base_mix[product].copy()
-            tightening = min(0.035 * max(macro_at_origination - 1.0, 0.0) / 0.65, 0.035)
+            mix = BASE_MIX[product].copy()
+            tightening = min(
+                0.035 * max(macro_at_origination - 1.0, 0.0) / 0.65, 0.035
+            )
             mix[0] += tightening
             mix[3] -= tightening
-            originated = rng.multinomial(total, mix / mix.sum())
-
+            originated = population_rng.multinomial(total, mix / mix.sum())
             for risk_index, count in enumerate(originated):
                 if count:
                     pools.append(
@@ -151,12 +320,15 @@ def simulate_retail_portfolio(config: RetailSimulationConfig) -> pd.DataFrame:
                             "risk_index": risk_index,
                             "originated_count": int(count),
                             "active_count": int(count),
+                            "opening_backbook": False,
+                            "backbook_tail": False,
                         }
                     )
 
     rows: list[dict] = []
     for observation_index, observation_month in enumerate(months):
-        macro = _macro_multiplier(observation_index)
+        report_offset = _calendar_month_distance(observation_month, reporting_start)
+        macro = _macro_multiplier(observation_month, report_offset, config)
         for pool in pools:
             if pool["cohort_index"] > observation_index or pool["active_count"] <= 0:
                 continue
@@ -169,19 +341,23 @@ def simulate_retail_portfolio(config: RetailSimulationConfig) -> pd.DataFrame:
                 continue
 
             pd_12m = min(
-                base_pd_12m[product][risk_index]
+                BASE_PD_12M[product][risk_index]
                 * _seasoning_multiplier(mob, product)
                 * macro,
                 0.45,
             )
             monthly_pd = 1.0 - (1.0 - pd_12m) ** (1.0 / 12.0)
             active = pool["active_count"]
-            defaults = int(rng.binomial(active, monthly_pd))
+            defaults = int(event_rng.binomial(active, monthly_pd))
             remaining = active - defaults
-            monthly_exit = 1.0 - (1.0 - annual_closure[product][risk_index]) ** (1.0 / 12.0)
-            exits = int(rng.binomial(remaining, monthly_exit))
+            monthly_exit = 1.0 - (
+                1.0 - ANNUAL_CLOSURE[product][risk_index]
+            ) ** (1.0 / 12.0)
+            exits = int(event_rng.binomial(remaining, monthly_exit))
 
-            weight_specific, weight_macro, weight_card, weight_installment = _sector_weights(product)
+            weight_specific, weight_macro, weight_card, weight_installment = (
+                _sector_weights(product)
+            )
             rows.append(
                 {
                     "observation_month": observation_month,
@@ -193,11 +369,13 @@ def simulate_retail_portfolio(config: RetailSimulationConfig) -> pd.DataFrame:
                     "obligor_count": active,
                     "ead_per_obligor": ead,
                     "pd_12m": pd_12m,
-                    "std_pd_12m": pd_12m * pd_cv[product],
-                    "recovery_rate": recovery[product],
+                    "std_pd_12m": pd_12m * PD_CV[product],
+                    "recovery_rate": RECOVERY[product],
                     "realized_defaults": defaults,
                     "realized_exits": exits,
                     "macro_multiplier": macro,
+                    "opening_backbook": pool["opening_backbook"],
+                    "backbook_tail": pool["backbook_tail"],
                     "sector_weight_specific": weight_specific,
                     "sector_weight_macro": weight_macro,
                     "sector_weight_card": weight_card,
@@ -253,14 +431,110 @@ def _run_snapshot(snapshot: pd.DataFrame, config: RetailSimulationConfig):
     return result, variance
 
 
+def portfolio_regime_diagnostics(
+    panel: pd.DataFrame,
+    config: RetailSimulationConfig,
+) -> pd.Series:
+    """Compara dois fechamentos sazonais equivalentes antes do reporte.
+
+    A comparação usa o início do burn-in e o início do reporte, separados por
+    12 meses. Além de nível, controla mix de produto, intensidade de risco e a
+    distribuição de EAD por idade. Assim, crescimento de estoque não pode ser
+    confundido silenciosamente com uma carteira madura.
+    """
+
+    report_month = pd.Timestamp(config.reporting_start)
+    baseline_month = report_month - pd.DateOffset(months=12)
+    baseline = panel[panel["observation_month"] == baseline_month].copy()
+    report = panel[panel["observation_month"] == report_month].copy()
+    if baseline.empty or report.empty:
+        raise ValueError("O painel não contém 12 meses completos antes do reporte.")
+
+    def summarize(snapshot: pd.DataFrame) -> dict:
+        gross_ead_pool = snapshot["obligor_count"] * snapshot["ead_per_obligor"]
+        el_pool = (
+            gross_ead_pool
+            * (1.0 - snapshot["recovery_rate"])
+            * snapshot["pd_12m"]
+        )
+        product_share = gross_ead_pool.groupby(snapshot["product"]).sum()
+        product_share = product_share / product_share.sum()
+        age_bucket = pd.cut(
+            snapshot["mob"],
+            bins=[-1, 5, 11, 23, 59, np.inf],
+            labels=["0–5", "6–11", "12–23", "24–59", "60+"],
+        )
+        age_share = gross_ead_pool.groupby(age_bucket, observed=False).sum()
+        age_share = age_share / age_share.sum()
+        return {
+            "gross_ead": float(gross_ead_pool.sum()),
+            "active": float(snapshot["obligor_count"].sum()),
+            "el_rate": float(el_pool.sum() / gross_ead_pool.sum()),
+            "product_share": product_share,
+            "age_share": age_share,
+        }
+
+    base_summary = summarize(baseline)
+    report_summary = summarize(report)
+    product_change = report_summary["product_share"].subtract(
+        base_summary["product_share"], fill_value=0.0
+    )
+    age_change = report_summary["age_share"].subtract(
+        base_summary["age_share"], fill_value=0.0
+    )
+    diagnostics = pd.Series(
+        {
+            "annual_ead_change": report_summary["gross_ead"]
+            / base_summary["gross_ead"]
+            - 1.0,
+            "annual_active_change": report_summary["active"] / base_summary["active"]
+            - 1.0,
+            "el_rate_change": report_summary["el_rate"] - base_summary["el_rate"],
+            "max_product_share_change": float(product_change.abs().max()),
+            "age_distribution_tv": float(0.5 * age_change.abs().sum()),
+        },
+        name="value",
+    )
+    diagnostics["passed"] = bool(
+        abs(diagnostics["annual_ead_change"])
+        <= config.max_pre_report_level_change
+        and abs(diagnostics["annual_active_change"])
+        <= config.max_pre_report_level_change
+        and abs(diagnostics["el_rate_change"])
+        <= config.max_pre_report_el_rate_change
+        and diagnostics["max_product_share_change"]
+        <= config.max_pre_report_mix_change
+        and diagnostics["age_distribution_tv"] <= config.max_pre_report_age_tv
+    )
+    return diagnostics
+
+
+def validate_portfolio_regime(
+    panel: pd.DataFrame,
+    config: RetailSimulationConfig,
+) -> pd.Series:
+    """Retorna os diagnósticos ou interrompe a análise se o regime não convergiu."""
+
+    diagnostics = portfolio_regime_diagnostics(panel, config)
+    if not bool(diagnostics["passed"]):
+        raise RuntimeError(
+            "A carteira não passou nos controles de regime; amplie ou recalibre o backbook."
+        )
+    return diagnostics
+
+
 def run_creditriskplus_over_time(
     panel: pd.DataFrame,
     config: RetailSimulationConfig,
 ) -> pd.DataFrame:
-    """Aplica CreditRisk+ a cada fechamento mensal após o ramp-up."""
+    """Aplica CreditRisk+ aos fechamentos reportados após validar o regime."""
 
+    validate_portfolio_regime(panel, config)
+    reporting_start = pd.Timestamp(config.reporting_start)
     months = sorted(panel["observation_month"].unique())
-    reported_months = months[config.warmup_months :]
+    reported_months = [month for month in months if month >= reporting_start][
+        : config.reporting_months
+    ]
     metrics: list[dict] = []
     for month in reported_months:
         snapshot = panel[panel["observation_month"] == month]
@@ -299,8 +573,13 @@ def run_creditriskplus_by_cohort(
 ) -> pd.DataFrame:
     """Aplica CreditRisk+ na fotografia de originação das 24 safras reportadas."""
 
-    origin = panel[panel["mob"] == 0].copy()
-    cohorts = sorted(origin["cohort_month"].unique())[config.warmup_months :]
+    reporting_start = pd.Timestamp(config.reporting_start)
+    origin = panel[(panel["mob"] == 0) & (~panel["opening_backbook"])].copy()
+    cohorts = [
+        cohort
+        for cohort in sorted(origin["cohort_month"].unique())
+        if cohort >= reporting_start
+    ][: config.reporting_months]
     metrics: list[dict] = []
     for cohort in cohorts:
         snapshot = origin[origin["cohort_month"] == cohort]
@@ -325,10 +604,18 @@ def run_creditriskplus_by_cohort(
 
 
 def vintage_default_curves(panel: pd.DataFrame, config: RetailSimulationConfig) -> pd.DataFrame:
-    """Constrói curvas acumuladas observadas por MOB para as safras reportadas."""
+    """Constrói curvas até um MOB comum para todas as safras reportadas."""
 
-    cohorts = sorted(panel["cohort_month"].unique())[config.warmup_months :]
-    selected = panel[panel["cohort_month"].isin(cohorts)]
+    reporting_start = pd.Timestamp(config.reporting_start)
+    cohorts = [
+        cohort
+        for cohort in sorted(panel.loc[~panel["opening_backbook"], "cohort_month"].unique())
+        if cohort >= reporting_start
+    ][: config.reporting_months]
+    selected = panel[
+        panel["cohort_month"].isin(cohorts)
+        & (panel["mob"] <= config.vintage_performance_months)
+    ]
     grouped = (
         selected.groupby(["cohort_month", "mob"], as_index=False)
         .agg(

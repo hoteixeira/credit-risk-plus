@@ -27,8 +27,9 @@ O modelo continua sujeito às aproximações que pertencem ao próprio CreditRis
 | Alta | O extrator calculava a EL a partir da coluna truncada da PMF | Produzia “referências” cerca de 0,3% abaixo do output oficial | Leitura dos KPIs gravados na tabela de percentis do XLS |
 | Média | Não havia validação rigorosa de dimensões, domínios e pesos | Inputs inválidos podiam contaminar silenciosamente os resultados | Validação de finitude, intervalos, shapes, pesos que somam um e índices setoriais |
 | Média | Convoluções densas e loops quadráticos tornavam testes muito lentos | O Exemplo 2 podia levar minutos e a simulação longitudinal ficava impraticável | Epsilons agregados por banda e convolução setorial por FFT |
-| Média | A simulação antiga de varejo tratava EAD agregado como intensidade de defaults | Distribuição e capital não correspondiam ao CreditRisk+ | Notebook antigo marcado como substituído; novo motor usa pools com multiplicidades exatas |
-| Média | Os notebooks 6–8 não reproduziam integralmente os exemplos oficiais | Conteúdo pedagógico contradizia código e planilha | Notebooks reescritos sobre a API canônica e reexecutados |
+| Média | A simulação antiga de varejo tratava EAD agregado como intensidade de defaults | Distribuição e capital não correspondiam ao CreditRisk+ | Notebook antigo excluído; novo motor usa pools com multiplicidades exatas |
+| Média | Os notebooks 1–8 continham explicações ou cálculos incompatíveis com o manual | Conteúdo pedagógico contradizia código, teoria ou planilha | Notebooks 1–8 reescritos sobre a API canônica e reexecutados |
+| Média | O notebook genérico de aplicações apresentava heurísticas de provisão, limite e preço como se fossem outputs do CreditRisk+ | Confundia o modelo de distribuição com decisões gerenciais e regulatórias externas | Notebook excluído; a wiki separa métricas do modelo de camadas de decisão |
 
 ## 4. Correspondência entre manual e código
 
@@ -97,16 +98,22 @@ O retorno histórico `(pmf, el)` foi preservado. Novas aplicações devem usar `
 
 `notebooks/11_safras_pf_brasil_creditriskplus.ipynb` foi criado e executado com:
 
-- 36 safras mensais, 12 de ramp-up e 24 reportadas;
+- backbook com 180 safras históricas explícitas e cauda madura de cartões preservada;
+- 12 meses de burn-in e 24 novas safras reportadas, todas acompanhadas até MOB 60;
+- controle pré-reporte de EAD, clientes, EL/EAD, mix de produto e distribuição por MOB;
 - cartão de crédito e crédito pessoal parcelado;
 - faixas A–D, seasoning, amortização/utilização, defaults, saídas e originação;
 - choque macro, contração de oferta e tightening de underwriting;
 - fatores específico, macro, cartão e parcelado;
 - CreditRisk+ em cada uma das 24 safras e em cada um dos 24 fechamentos;
 - EL, sigma, VaR 95%/99%/99,9%, capital, massa truncada, produto e vintage;
-- tabelas executivas, séries temporais, composição e heatmap de MOB.
+- tabelas executivas, séries temporais, composição e heatmap de MOB sem censura desigual entre safras.
 
 O cenário é sintético. As fontes do Banco Central são usadas como enquadramento e definição, não como alegação de que os parâmetros simulados foram estimados diretamente das séries.
+
+No cenário executado, a comparação sazonal entre a abertura do burn-in e a abertura do reporte encontrou EAD `+0,31%`, clientes ativos `+0,48%`, EL/EAD `+0,11 p.p.`, mudança máxima de participação por produto `0,29 p.p.` e distância de variação total da distribuição etária `0,36%`. O gate rejeita automaticamente desvios superiores aos limites configurados. O crescimento de aproximadamente 90% observado na versão iniciada sem backbook foi eliminado.
+
+O parecer individual dos nove notebooks mantidos e a justificativa para as duas exclusões estão em `notebooks/README.md`.
 
 ## 9. Limitações remanescentes
 

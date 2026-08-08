@@ -5,11 +5,18 @@ from __future__ import annotations
 import unittest
 
 import numpy as np
+import pandas as pd
 
 from creditriskplus import CreditRiskPlus, data
 from creditriskplus.simple_model import (
     analytic_loss_moments,
     calculate_loss_distribution_detailed,
+)
+from creditriskplus.retail import (
+    RetailSimulationConfig,
+    portfolio_regime_diagnostics,
+    simulate_retail_portfolio,
+    validate_portfolio_regime,
 )
 from extract_expected import extract_kpis
 
@@ -230,6 +237,102 @@ class SpreadsheetRegressionTests(unittest.TestCase):
             portfolio[columns].to_numpy(),
             [columns.index("sector_weight_Specific")],
         )
+
+
+class MatureRetailPortfolioTests(unittest.TestCase):
+    """Valida a formação do backbook anterior aos 24 meses reportados."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Simula uma única vez o cenário longitudinal determinístico."""
+
+        cls.config = RetailSimulationConfig()
+        cls.panel = simulate_retail_portfolio(cls.config)
+
+    def test_opening_backbook_contains_explicit_history_and_card_tail(self):
+        """Evita regressão para uma carteira iniciada vazia."""
+
+        opening = self.panel[
+            self.panel["observation_month"] == self.config.simulation_start
+        ]
+        self.assertTrue(opening["opening_backbook"].any())
+        self.assertTrue(opening["backbook_tail"].any())
+        self.assertGreaterEqual(opening.loc[opening.opening_backbook, "mob"].max(), 181)
+
+    def test_portfolio_passes_pre_reporting_regime_gate(self):
+        """Controla nível, mix, EL/EAD e distribuição etária antes do reporte."""
+
+        diagnostics = validate_portfolio_regime(self.panel, self.config)
+        self.assertTrue(diagnostics["passed"])
+        self.assertLess(abs(diagnostics["annual_ead_change"]), 0.08)
+        self.assertLess(diagnostics["age_distribution_tv"], 0.04)
+
+    def test_reporting_window_is_independent_from_backbook_length(self):
+        """Ancora o cenário macro no reporte, não no tamanho do histórico."""
+
+        short_config = RetailSimulationConfig(backbook_months=60)
+        short_panel = simulate_retail_portfolio(short_config)
+        start = np.datetime64(self.config.reporting_start)
+        long_macro = (
+            self.panel[self.panel.observation_month >= start]
+            .groupby("observation_month")["macro_multiplier"]
+            .first()
+            .iloc[: self.config.reporting_months]
+        )
+        short_macro = (
+            short_panel[short_panel.observation_month >= start]
+            .groupby("observation_month")["macro_multiplier"]
+            .first()
+            .iloc[: short_config.reporting_months]
+        )
+        np.testing.assert_allclose(long_macro.to_numpy(), short_macro.to_numpy())
+        self.assertEqual(len(long_macro), self.config.reporting_months)
+
+    def test_all_reported_cohorts_reach_the_same_vintage_horizon(self):
+        """Evita comparar safras maduras com safras censuradas em MOBs menores."""
+
+        from creditriskplus.retail import vintage_default_curves
+
+        curves = vintage_default_curves(self.panel, self.config)
+        maximum_mob = curves.groupby("cohort_month")["mob"].max()
+        self.assertEqual(len(maximum_mob), self.config.reporting_months)
+        self.assertTrue(
+            (maximum_mob == self.config.vintage_performance_months).all()
+        )
+
+    def test_longer_vintage_does_not_rewrite_reported_events(self):
+        """Separa a aleatoriedade do futuro dos defaults já reportados."""
+
+        short_config = RetailSimulationConfig(vintage_performance_months=12)
+        short_panel = simulate_retail_portfolio(short_config)
+        report_end = pd.Timestamp(self.config.reporting_start) + pd.DateOffset(
+            months=self.config.reporting_months - 1
+        )
+        keys = [
+            "observation_month",
+            "cohort_month",
+            "product",
+            "risk_band",
+            "obligor_count",
+            "realized_defaults",
+            "realized_exits",
+        ]
+        long_report = self.panel[self.panel.observation_month <= report_end][keys]
+        short_report = short_panel[short_panel.observation_month <= report_end][keys]
+        pd.testing.assert_frame_equal(
+            long_report.reset_index(drop=True),
+            short_report.reset_index(drop=True),
+        )
+
+    def test_diagnostic_detects_an_immature_portfolio(self):
+        """Demonstra que o controle rejeita uma perda material de estoque."""
+
+        altered = self.panel.copy()
+        report_month = np.datetime64(self.config.reporting_start)
+        mask = altered.observation_month == report_month
+        altered.loc[mask, "obligor_count"] //= 2
+        diagnostics = portfolio_regime_diagnostics(altered, self.config)
+        self.assertFalse(diagnostics["passed"])
 
 
 if __name__ == "__main__":

@@ -152,12 +152,11 @@ O RARoC permite comparar negócios de diferentes qualidades de crédito numa bas
 
 ## 7. Gestão de Portfólio de Varejo
 
-O notebook `10_simulacao_portfolio_varejo.ipynb` aplica o Credit Risk+ a um portfólio de 1 milhão de clientes ao longo de 24 meses, combinando:
+O notebook `11_safras_pf_brasil_creditriskplus.ipynb` aplica o CreditRisk+ a uma carteira PF sintética de cartão e crédito parcelado. O estoque inicial contém 180 meses de safras históricas e uma cauda agregada de cartões antigos; depois de 12 meses de burn-in, 24 novas safras são reportadas e todas permanecem em observação até MOB 60. Um gate de convergência controla nível, mix, EL/EAD e distribuição por MOB antes da análise. Em cada um dos 24 fechamentos reportados, a distribuição é calculada com pools homogêneos e multiplicidades exatas, sem converter EAD em contagem de defaults.
 
-- Migração de ratings via cadeia de Markov.
-- Choque macroeconômico no mês 12.
-- Cálculo mensal de EL, VaR e Capital Econômico.
-- Decomposição por rating e RARoC.
+O cenário inclui seasoning, amortização ou utilização, originação, saídas, choque macroeconômico e mudanças de underwriting. Esses mecanismos geram os inputs do modelo; não são hipóteses originais do CreditRisk+. EL, VaR discreto e capital econômico são calculados pela implementação canônica e a massa truncada é controlada explicitamente.
+
+Os parâmetros são ilustrativos e precisam ser recalibrados e validados com dados observados antes de uso bancário.
 
 Ver [Implementação Python](09-Implementacao-Python) para mais detalhes.
 
