@@ -1,37 +1,77 @@
-# CreditRisk+ em Python — modelo, validação e estudos
+# CreditRisk+ e Vasicek/IRB em Python
 
-Implementação auditável do **CreditRisk+**, publicado pelo Credit Suisse First Boston em 1997, acompanhada de notebooks educacionais em português e regressões contra os artefatos oficiais do modelo.
+Implementação auditável de dois referenciais complementares de risco de crédito, acompanhada de documentação matemática e dez notebooks didáticos em português:
 
-O projeto calcula analiticamente a distribuição de perdas por default de uma carteira. Ele cobre o limite Poisson de taxa fixa, a mistura Poisson–Gama de taxas variáveis, múltiplos fatores setoriais, alocações fracionárias, setor específico, momentos analíticos, capital econômico e contribuições de risco. Inclui ainda um estudo longitudinal de carteira PF brasileira sintética com cartão de crédito e crédito pessoal parcelado.
+- **CreditRisk+**: distribuição completa de perdas, perda esperada, volatilidade, VaR, capital econômico e contribuições de risco sob a formulação Poisson–Gama do Credit Suisse First Boston;
+- **Vasicek/ASRF–IRB**: perda condicional a um fator macroeconômico, capital inesperado no percentil de 99,9%, RWA e contribuições marginais/Euler por contrato;
+- **carteira PF longitudinal**: dados sintéticos reprodutíveis de cartão de crédito e crédito pessoal parcelado, com backbook maduro, safras, MOB, ciclo econômico e aplicação mensal dos dois modelos.
 
-Este repositório é adequado para estudo, reprodução metodológica e prototipação controlada. O notebook PF não é uma calibração de mercado nem um modelo aprovado para decisão, provisionamento ou capital regulatório.
+O CreditRisk+ é confrontado com o manual e os cinco exemplos da planilha oficial. O Vasicek/IRB segue a derivação ASRF do BCBS e as funções de varejo da Resolução BCB 303. O projeto serve para estudo, reprodução metodológica e prototipação controlada; os parâmetros sintéticos não constituem calibração bancária, autorização IRB, cálculo contábil da Resolução CMN 4.966 nem recomendação de decisão de crédito.
+
+## Navegação rápida
+
+| Objetivo | Ponto de entrada |
+|---|---|
+| Instalar e validar o projeto | [Instalação e execução](#instalação-e-execução) |
+| Entender qual modelo usar | [Como as três camadas se relacionam](#como-as-três-camadas-se-relacionam) |
+| Estudar o CreditRisk+ | [Construção matemática](#construção-matemática-do-creditrisk) e notebooks 01–08 |
+| Estudar Vasicek, IRB e capital marginal | [Modelo Vasicek/ASRF–IRB](#modelo-vasicekasrfirb) e notebook 12 |
+| Reproduzir a carteira PF e as safras | [Camada longitudinal PF](#camada-longitudinal-pf) e notebook 11 |
+| Consultar a validação | [Testes e evidências](#testes-e-evidências) |
+| Ver ressalvas metodológicas | [Limitações e uso responsável](#limitações-e-uso-responsável) |
+| Ver fontes e checksums | [`references/README.md`](references/README.md) |
+
+## Como as três camadas se relacionam
+
+Os dois modelos de risco não são versões concorrentes da mesma conta. Eles respondem perguntas diferentes e compartilham apenas os dados de entrada da carteira PF.
+
+| Camada | Pergunta respondida | Saída principal |
+|---|---|---|
+| Simulador longitudinal PF | Como uma carteira sintética madura evolui por safra, produto, risco e MOB? | Painel mensal de pools homogêneos com PD, EAD, recuperação, contagens e fatores |
+| CreditRisk+ | Qual é a distribuição incondicional de perdas da fotografia da carteira? | PMF, EL, desvio padrão, VaR, capital econômico e contribuições aproximadas ao percentil |
+| Vasicek/IRB | Qual é a perda condicional no cenário sistemático adverso e o capital ASRF correspondente? | EL, perda adversa, capital, RWA e contribuição Euler por contrato |
+
+```mermaid
+flowchart LR
+    R[Referências oficiais] --> T[Testes e regressões]
+    X[Planilha CreditRisk+] --> D[Carteiras dos exemplos]
+    D --> C[Núcleo CreditRisk+]
+    P[Simulador PF longitudinal] --> C
+    P --> V[Núcleo Vasicek/IRB]
+    C --> N11[Notebook 11: safras e distribuição de perdas]
+    V --> N12[Notebook 12: capital e contribuições marginais]
+    T --> C
+    T --> V
+```
 
 ## Estado da implementação
 
-- Um único núcleo matemático em `creditriskplus/simple_model.py`.
-- API funcional e classe orientada a objetos produzindo os mesmos resultados.
-- Cinco exemplos oficiais reproduzidos contra `references/CreditRisk+.xls`.
-- Quantil discreto separado da interpolação usada pela planilha legada.
-- Massa de cauda truncada exposta e nunca renormalizada silenciosamente.
-- Nove notebooks executáveis e comentados.
-- Carteira PF inicializada com backbook maduro e gate de convergência.
-- 18 testes matemáticos e regressivos automatizados.
+- versão do pacote: `2.0.0`;
+- núcleo CreditRisk+ canônico em `creditriskplus/simple_model.py`, reutilizado pela API orientada a objetos;
+- núcleo Vasicek/IRB em `creditriskplus/vasicek_irb.py`, com capital e contribuições Euler vetorizadas;
+- gerador PF em `creditriskplus/retail.py`, com backbook maduro e gate de convergência antes do reporte;
+- cinco exemplos oficiais reproduzidos contra `references/CreditRisk+.xls`;
+- quantil discreto separado da interpolação usada exclusivamente para reproduzir a planilha legada;
+- massa de cauda truncada exposta e nunca renormalizada silenciosamente;
+- dez notebooks executáveis, comentados e validados célula a célula;
+- 25 testes matemáticos, regulatórios e regressivos automatizados;
+- sete documentos de referência locais, com origem e SHA-256 registrados.
 
-O parecer completo da revisão está em [AUDITORIA_TECNICA.md](AUDITORIA_TECNICA.md). A matriz de validação dos notebooks está em [notebooks/README.md](notebooks/README.md).
+A última execução completa, em 9 de agosto de 2026, aprovou **25/25 testes e 10/10 notebooks**. A auditoria detalhada do núcleo CreditRisk+ está em [AUDITORIA_TECNICA.md](AUDITORIA_TECNICA.md); a matriz atual dos dez estudos, incluindo Vasicek/IRB, está em [notebooks/README.md](notebooks/README.md).
 
 ## Referências oficiais incluídas
 
 O diretório `references/` contém:
 
-- `CreditRisk+.pdf`: manual *CreditRisk+ — A Credit Risk Management Framework*;
-- `CreditRisk+.xls`: planilha oficial com os Exemplos 1A–1C, 2 e 3;
-- `BCB_Resolucao_303_2023_IRB.pdf`: função regulatória IRB e correlações de varejo;
-- `BIS_Basel_Framework_consolidated.pdf`: Basel Framework, incluindo CRE30 e CRE31;
-- `BCBS_IRB_Risk_Weight_Functions_Explanatory_Note_2005.pdf`: derivação ASRF/Vasicek;
-- `CMN_Resolucao_4966_2021_DOU_original.pdf`: texto original da Resolução CMN 4.966 no DOU;
-- `BCB_Relatorio_Economia_Bancaria_2023.pdf`: contexto empírico da carteira PF brasileira.
+- [`CreditRisk+.pdf`](references/CreditRisk+.pdf): manual *CreditRisk+ — A Credit Risk Management Framework*;
+- [`CreditRisk+.xls`](references/CreditRisk+.xls): planilha oficial com os Exemplos 1A–1C, 2 e 3;
+- [`BCB_Resolucao_303_2023_IRB.pdf`](references/BCB_Resolucao_303_2023_IRB.pdf): função regulatória IRB e correlações de varejo;
+- [`BIS_Basel_Framework_consolidated.pdf`](references/BIS_Basel_Framework_consolidated.pdf): Basel Framework, incluindo CRE30 e CRE31;
+- [`BCBS_IRB_Risk_Weight_Functions_Explanatory_Note_2005.pdf`](references/BCBS_IRB_Risk_Weight_Functions_Explanatory_Note_2005.pdf): derivação ASRF/Vasicek;
+- [`CMN_Resolucao_4966_2021_DOU_original.pdf`](references/CMN_Resolucao_4966_2021_DOU_original.pdf): texto original da Resolução CMN 4.966 no DOU;
+- [`BCB_Relatorio_Economia_Bancaria_2023.pdf`](references/BCB_Relatorio_Economia_Bancaria_2023.pdf): contexto empírico da carteira PF brasileira.
 
-A implementação CreditRisk+ foi confrontada principalmente com as Seções A3–A5, A7–A13 e com os cinco exemplos da planilha. A proveniência, a ressalva sobre a consolidação vigente da Resolução CMN 4.966 e os checksums estão em [`references/README.md`](references/README.md).
+A implementação CreditRisk+ foi confrontada principalmente com as Seções A3–A5, A7–A13 e com os cinco exemplos da planilha. A Resolução CMN 4.966 é uma referência contábil incluída para consulta, mas **não é implementada como motor de provisão** neste repositório. A proveniência, a ressalva sobre sua consolidação vigente e os checksums estão em [`references/README.md`](references/README.md).
 
 ## O que o CreditRisk+ modela
 
@@ -58,7 +98,7 @@ O modelo não explica a causa econômica do default e não modela diretamente mi
 
 Essas hipóteses pertencem ao próprio CreditRisk+. A implementação procura não acrescentar aproximações ocultas além delas.
 
-## Construção matemática
+## Construção matemática do CreditRisk+
 
 ### 1. Exposição líquida de recuperação
 
@@ -236,6 +276,100 @@ A classe `CreditRiskPlus` implementa:
 
 A diferença de VaR depois da remoção finita de contratos não é uma contribuição Euler e não deve ser dividida ou somada como se fosse uma alocação marginal.
 
+## Modelo Vasicek/ASRF–IRB
+
+O módulo `creditriskplus/vasicek_irb.py` implementa o modelo gaussiano de um fator e sua especialização IRB de varejo. Ele não calcula a mesma distribuição discreta do CreditRisk+: no limite assintótico de granularidade, a incerteza idiossincrática diversifica e a perda da carteira passa a ser determinada pelo fator sistemático comum.
+
+### 1. Variável latente e cenário macroeconômico
+
+Para cada contrato $i$, a variável de qualidade de crédito é
+
+$$
+A_i=\sqrt{R_i}W+\sqrt{1-R_i}\varepsilon_i,
+$$
+
+onde $W$ e $\varepsilon_i$ são normais-padrão independentes e $R_i$ é a correlação de ativos. O default ocorre quando
+
+$$
+A_i\leq \Phi^{-1}(PD_i).
+$$
+
+Logo, condicionada ao cenário $W=w$, a probabilidade de default é
+
+$$
+p_i(w)=\Phi\!\left(
+\frac{\Phi^{-1}(PD_i)-\sqrt{R_i}w}{\sqrt{1-R_i}}
+\right).
+$$
+
+O projeto usa a convenção em que $W<0$ representa deterioração econômica. A identidade $E[p_i(W)]=PD_i$ é verificada numericamente por integração de Gauss–Hermite.
+
+### 2. Correlação regulatória de varejo
+
+`retail_asset_correlation` oferece três categorias explícitas:
+
+- `qrre`: rotativo de varejo qualificado, $R=4\%$;
+- `residential`: exposição garantida por imóvel residencial, $R=15\%$;
+- `other_retail`: demais exposições de varejo, com
+
+$$
+R(PD)=0{,}03\,w(PD)+0{,}16[1-w(PD)],
+\qquad
+w(PD)=\frac{1-e^{-35PD}}{1-e^{-35}}.
+$$
+
+No notebook 12, cartão é tratado como QRRE apenas como hipótese do cenário principal e também é recalculado como `other_retail`. Os dados sintéticos não demonstram os requisitos de elegibilidade QRRE.
+
+### 3. Perda adversa, capital e RWA
+
+Para confiança $q=99{,}9\%$, a perda alta corresponde ao fator
+
+$$
+w_q=\Phi^{-1}(1-q)=-\Phi^{-1}(q)\approx-3{,}0902.
+$$
+
+Para cada contrato ou pool:
+
+$$
+EL_i=EAD_i\,LGD_i\,PD_i,
+$$
+
+$$
+L_i(w_q)=EAD_i\,LGD_i\,p_i(w_q),
+$$
+
+$$
+C_i=L_i(w_q)-EL_i
+=EAD_i\,LGD_i[p_i(w_q)-PD_i],
+$$
+
+$$
+RWA_i=12{,}5\,C_i.
+$$
+
+`calculate_vasicek_irb` devolve esses valores por linha e agregados. Em varejo não há ajuste de maturidade na função implementada.
+
+### 4. Capital marginal e contribuição Euler
+
+Mantendo PD, LGD e $R$ fixos, o capital é linear na EAD. Portanto,
+
+$$
+\frac{\partial C}{\partial EAD_i}
+=LGD_i[p_i(w_q)-PD_i]
+$$
+
+é o capital marginal por unidade adicional de EAD, e
+
+$$
+EAD_i\frac{\partial C}{\partial EAD_i}=C_i
+$$
+
+é a contribuição Euler exata. Para pools homogêneos, `obligor_count` multiplica essa contribuição sem aproximação adicional; a equivalência com a expansão contrato a contrato é testada automaticamente.
+
+### 5. Fronteira de interpretação
+
+O valor ASRF/IRB não inclui risco de concentração finita, erro de estimação, múltiplos fatores correlacionados, ajuste gerencial, buffers, tributos ou requisitos adicionais de supervisão. Os pisos de PD/LGD e a transformação TTC usados no notebook 12 pertencem ao cenário didático e ficam fora da função genérica, que recebe os parâmetros já preparados.
+
 ## Controles numéricos
 
 ### Truncamento
@@ -260,12 +394,12 @@ Quando a probabilidade de perda zero não cabe em `float64`, a recursão é exec
 
 `obligor_counts=m_A` comprime contratos com EAD, PD, volatilidade, recuperação e pesos setoriais idênticos. Multiplicar suas contribuições por \(m_A\) é algebricamente equivalente a repetir as linhas. A homogeneidade dentro do pool, contudo, é uma decisão de segmentação que precisa ser validada em uso real.
 
-## Instalação
+## Instalação e execução
 
-Requer Python 3.10 ou superior.
+As versões fixadas em `requirements.txt` requerem **Python 3.11 ou superior**. A validação mais recente foi executada com Python 3.14.6, NumPy 2.4.4, SciPy 1.17.1 e pandas 3.0.2.
 
 ```bash
-git clone <endereco-do-repositorio>
+git clone https://github.com/hoteixeira/credit-risk-plus.git
 cd credit-risk-plus
 python -m venv venv
 source venv/bin/activate
@@ -279,7 +413,17 @@ No Windows PowerShell, a ativação equivalente é:
 venv\Scripts\Activate.ps1
 ```
 
-## Uso rápido da API funcional
+Como o projeto ainda não é distribuído como pacote PyPI, execute scripts e notebooks a partir da raiz clonada. O fluxo mínimo de verificação é:
+
+```bash
+python run_tests.py
+python test_notebooks.py
+jupyter lab
+```
+
+`run_tests.py` executa a suíte matemática e as regressões contra a planilha. `test_notebooks.py` abre cada notebook em memória, executa todas as células com timeout individual de 600 segundos e não sobrescreve os arquivos versionados.
+
+## API CreditRisk+ — uso funcional
 
 Para aplicações novas, prefira a API detalhada:
 
@@ -316,9 +460,9 @@ VaR99 interpolado como XLS: 55.311.503,38
 Massa truncada: aproximadamente 1,1e-12
 ```
 
-A função histórica `calculate_loss_distribution` continua disponível e retorna apenas `(pmf, expected_loss)`.
+A função histórica `calculate_loss_distribution` continua disponível e retorna apenas `(pmf, expected_loss)`. Para cálculos novos, use o retorno detalhado, pois ele torna truncamento e parâmetros setoriais auditáveis.
 
-## Parâmetros da API principal
+### Parâmetros da API principal
 
 ```python
 result = calculate_loss_distribution_detailed(
@@ -346,7 +490,7 @@ result = calculate_loss_distribution_detailed(
 | `max_loss_dollars` | Maior perda monetária incluída no domínio computado |
 | `obligor_counts` | Multiplicidade inteira não negativa de cada pool homogêneo |
 
-## Uso da classe orientada a objetos
+### Uso da classe orientada a objetos
 
 ```python
 from creditriskplus import CreditRiskPlus, data
@@ -370,6 +514,88 @@ contributions = model.calculate_risk_contributions(percentile=99)
 ```
 
 `model.py` é uma fachada sobre `simple_model.py`; não existe uma segunda recursão matemática independente.
+
+## API Vasicek/IRB — capital e marginal
+
+O exemplo abaixo trata cada linha como um pool homogêneo. A primeira linha é cartão sob hipótese QRRE; a segunda é crédito parcelado classificado como demais varejo.
+
+```python
+import numpy as np
+
+from creditriskplus import calculate_vasicek_irb, retail_asset_correlation
+
+pd = np.array([0.020, 0.080])
+ead_por_contrato = np.array([3_500.0, 9_000.0])
+lgd = np.array([0.85, 0.78])
+categoria = np.array(["qrre", "other_retail"])
+quantidade = np.array([1_000, 500])
+
+correlacao = retail_asset_correlation(pd, categoria)
+result = calculate_vasicek_irb(
+    pd=pd,
+    ead_per_obligor=ead_por_contrato,
+    lgd=lgd,
+    asset_correlation=correlacao,
+    obligor_count=quantidade,
+    confidence=0.999,
+)
+
+print(f"EAD: {result.total_ead:,.2f}")
+print(f"EL: {result.total_expected_loss:,.2f}")
+print(f"Perda adversa: {result.total_adverse_loss:,.2f}")
+print(f"Capital: {result.total_capital:,.2f}")
+print(f"RWA: {result.total_rwa:,.2f}")
+print("Capital marginal por real de EAD:", result.marginal_capital_per_ead)
+print("Contribuição Euler dos pools:", result.capital_pool)
+```
+
+As funções públicas do módulo são:
+
+| Função/objeto | Finalidade |
+|---|---|
+| `retail_asset_correlation` | Aplica as correlações QRRE, residencial ou demais varejo |
+| `conditional_default_probability` | Calcula $P(default\mid W=w)$ contrato a contrato |
+| `downturn_default_probability` | Obtém a PD condicional no cenário associado ao quantil escolhido |
+| `conditional_portfolio_loss` | Soma a perda condicional da carteira para um valor arbitrário de $W$ |
+| `calculate_vasicek_irb` | Calcula EL, perda adversa, capital, RWA e contribuições marginais/Euler |
+| `VasicekIRBResult` | Estrutura imutável com vetores por linha e propriedades agregadas |
+
+## Camada longitudinal PF
+
+`creditriskplus/retail.py` gera um painel sintético determinístico a partir de `RetailSimulationConfig`. As linhas representam pools homogêneos; `obligor_count` é a quantidade de contratos representada por cada linha.
+
+```python
+from creditriskplus.retail import (
+    RetailSimulationConfig,
+    run_creditriskplus_over_time,
+    simulate_retail_portfolio,
+    validate_portfolio_regime,
+    vintage_default_curves,
+)
+
+config = RetailSimulationConfig(
+    reporting_start="2023-01-01",
+    reporting_months=24,
+    backbook_months=180,
+    burn_in_months=12,
+    vintage_performance_months=60,
+    seed=20260808,
+)
+
+panel = simulate_retail_portfolio(config)
+diagnostics = validate_portfolio_regime(panel, config)
+monthly_risk = run_creditriskplus_over_time(panel, config)
+vintages = vintage_default_curves(panel, config)
+```
+
+O fluxo é deliberadamente sequencial:
+
+1. `simulate_retail_portfolio` reconstrói as safras históricas sobreviventes, mantém uma cauda madura de cartão e simula originação, default e saída;
+2. `validate_portfolio_regime` compara fechamentos sazonais equivalentes e interrompe o estudo se nível, EL/EAD, mix ou distribuição etária ainda estiverem convergindo;
+3. `run_creditriskplus_over_time` calcula 24 fotografias da distribuição de perdas, ampliando automaticamente a cauda até atender à tolerância;
+4. `vintage_default_curves` acompanha todas as 24 safras reportadas até o mesmo MOB 60, evitando censura desigual.
+
+O notebook 12 chama o mesmo gerador e a mesma semente do notebook 11. Assim, a comparação entre CreditRisk+ e Vasicek/IRB muda o método de risco, não a carteira subjacente.
 
 ## Estrutura do repositório
 
@@ -417,6 +643,13 @@ credit-risk-plus/
 ## Roteiro dos notebooks
 
 Os notebooks 01–03 apresentam a teoria, 04–08 reproduzem os exemplos oficiais, o notebook 11 aplica o CreditRisk+ a uma carteira PF longitudinal e o notebook 12 reutiliza essa carteira no modelo Vasicek/IRB.
+
+| Trilha | Ordem sugerida | Resultado |
+|---|---|---|
+| Fundamentos CreditRisk+ | 01 → 02 → 03 | Hipóteses, banding, Poisson e mistura Poisson–Gama |
+| Conformidade com a referência | 04 → 05 → 06 → 07 → 08 | Reprodução dos cinco exemplos oficiais |
+| Carteira PF e safras | 11 | Distribuição de perdas e capital econômico ao longo do tempo |
+| Capital regulatório e marginal | 12 | Vasicek/IRB, RWA e contribuições Euler por contrato |
 
 ### 01 — Introdução
 
@@ -515,6 +748,14 @@ Reutiliza literalmente a configuração e a semente do notebook 11, mas aplica o
 
 O notebook trata o cartão como QRRE apenas para construir o cenário principal e calcula também a alternativa conservadora de “demais varejo”. Os dados sintéticos não comprovam elegibilidade regulatória, não constituem calibração aprovada de PD/LGD/EAD e não incorporam risco de concentração finita. Essas limitações aparecem antes dos cálculos e nas conclusões, em vez de serem absorvidas por ajustes ad hoc.
 
+O arquivo [`scripts/build_notebook_12.py`](scripts/build_notebook_12.py) é a fonte textual reprodutível do notebook 12. Para reconstruí-lo deliberadamente:
+
+```bash
+python scripts/build_notebook_12.py
+```
+
+O comando substitui o `.ipynb` correspondente; execute `python test_notebooks.py` depois e confira o diff antes de versionar.
+
 ## Notebooks excluídos
 
 Dois notebooks antigos foram removidos durante a auditoria:
@@ -550,7 +791,7 @@ A comparação de VaR usa a interpolação linear da planilha; a API econômica 
 
 As contribuições de risco têm duas convenções, porque a equação 121 do manual não especifica se a PD é a bruta do rating ou a compensada pelo banding. `convention="manual"` (padrão) usa a compensada e é aditiva por construção; `convention="spreadsheet"` reproduz o XLS. A diferença por contraparte chega a 5% e está documentada em [AUDITORIA_TECNICA.md](AUDITORIA_TECNICA.md) seção 6.1.
 
-## Testes e reprodução
+## Testes e evidências
 
 Execute as identidades matemáticas e regressões contra o XLS:
 
@@ -558,7 +799,7 @@ Execute as identidades matemáticas e regressões contra o XLS:
 python run_tests.py
 ```
 
-A suíte cobre, entre outros pontos:
+A suíte contém 25 testes e cobre, entre outros pontos:
 
 1. limite Poisson contra a PMF fechada;
 2. momentos da PMF contra A115–A118;
@@ -574,7 +815,12 @@ A suíte cobre, entre outros pontos:
 12. aditividade da convenção do manual e rejeição de convenções desconhecidas;
 13. maturidade do backbook PF;
 14. horizonte comum de MOB 60;
-15. invariância dos eventos reportados quando o horizonte de vintage é ampliado.
+15. invariância dos eventos reportados quando o horizonte de vintage é ampliado;
+16. integração numérica de $E[P(default\mid W)]=PD$;
+17. limites e categorias da correlação regulatória de varejo;
+18. igualdade entre pools Vasicek/IRB e expansão contrato a contrato;
+19. capital marginal analítico contra diferença finita em EAD;
+20. reconciliação $C=L_{\mathrm{adversa}}-EL$ e $RWA=12{,}5\times C$.
 
 Execute todos os notebooks em memória:
 
@@ -582,7 +828,7 @@ Execute todos os notebooks em memória:
 python test_notebooks.py
 ```
 
-O segundo comando é mais lento porque recalcula todas as distribuições e gráficos do estudo longitudinal.
+O segundo comando é mais lento porque recalcula todas as distribuições e gráficos dos estudos longitudinais. Na validação mais recente, os dez notebooks executaram sem erro.
 
 Para abrir os estudos interativamente:
 
@@ -600,9 +846,15 @@ jupyter lab
 - A102 fornece uma aproximação de contribuição ao percentil, não uma decomposição exata de VaR.
 - O exemplo multi-ano oficial não é um modelo completo de transição temporal.
 - A carteira PF usa parâmetros sintéticos, não estimativas extraídas diretamente das séries do Banco Central.
+- O limite ASRF pressupõe granularidade suficiente para diversificar o risco idiossincrático; concentração finita exige tratamento adicional.
+- A classificação de cartão como QRRE no notebook 12 é uma hipótese de sensibilidade, não evidência de elegibilidade regulatória.
+- O capital IRB não inclui buffers, requisitos adicionais, risco de modelo nem efeitos de uma arquitetura multifator.
+- A Resolução CMN 4.966 trata reconhecimento, mensuração e perda esperada contábil; o projeto a inclui como referência, mas não implementa toda a metodologia contábil nem a confunde com capital inesperado.
 - Uso real exige calibração interna, tratamento de censura, backtesting, validação fora da amostra, estabilidade e governança.
 
 ## Documentação complementar
+
+A Wiki documenta o núcleo CreditRisk+ e seus exemplos. Para Vasicek/IRB, use esta página, o notebook 12, as docstrings de `vasicek_irb.py` e os documentos regulatórios locais.
 
 - [Visão geral](wiki/01-Visao-Geral.md)
 - [Dados de entrada](wiki/02-Dados-de-Entrada.md)
@@ -615,9 +867,18 @@ jupyter lab
 - [Implementação Python](wiki/09-Implementacao-Python.md)
 - [Validação](wiki/10-Validacao.md)
 - [Referências](wiki/11-Referencias.md)
+- [Auditoria matemática do CreditRisk+](AUDITORIA_TECNICA.md)
+- [Matriz de validação dos notebooks](notebooks/README.md)
+- [Proveniência e checksums das referências](references/README.md)
 
-## Referência bibliográfica
+## Referências bibliográficas principais
 
 Credit Suisse Financial Products. *CreditRisk+: A Credit Risk Management Framework*. Credit Suisse First Boston International, 1997.
 
-Os direitos sobre o manual e a planilha pertencem aos respectivos titulares. Os arquivos são utilizados aqui como referência metodológica e de reprodução dos exemplos.
+Basel Committee on Banking Supervision. *An Explanatory Note on the Basel II IRB Risk Weight Functions*. Bank for International Settlements, 2005.
+
+Banco Central do Brasil. *Resolução BCB nº 303, de 16 de março de 2023*.
+
+Conselho Monetário Nacional. *Resolução CMN nº 4.966, de 25 de novembro de 2021* — publicação original; consultar a consolidação vigente no portal do BCB.
+
+Os direitos sobre os documentos e a planilha pertencem aos respectivos titulares. Os arquivos são utilizados como referência metodológica, regulatória e de reprodução dos exemplos.
