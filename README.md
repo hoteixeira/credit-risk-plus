@@ -24,9 +24,14 @@ O parecer completo da revisão está em [AUDITORIA_TECNICA.md](AUDITORIA_TECNICA
 O diretório `references/` contém:
 
 - `CreditRisk+.pdf`: manual *CreditRisk+ — A Credit Risk Management Framework*;
-- `CreditRisk+.xls`: planilha oficial com os Exemplos 1A–1C, 2 e 3.
+- `CreditRisk+.xls`: planilha oficial com os Exemplos 1A–1C, 2 e 3;
+- `BCB_Resolucao_303_2023_IRB.pdf`: função regulatória IRB e correlações de varejo;
+- `BIS_Basel_Framework_consolidated.pdf`: Basel Framework, incluindo CRE30 e CRE31;
+- `BCBS_IRB_Risk_Weight_Functions_Explanatory_Note_2005.pdf`: derivação ASRF/Vasicek;
+- `CMN_Resolucao_4966_2021_DOU_original.pdf`: texto original da Resolução CMN 4.966 no DOU;
+- `BCB_Relatorio_Economia_Bancaria_2023.pdf`: contexto empírico da carteira PF brasileira.
 
-A implementação foi confrontada principalmente com as Seções A3–A5, A7–A13 e com os cinco exemplos da planilha.
+A implementação CreditRisk+ foi confrontada principalmente com as Seções A3–A5, A7–A13 e com os cinco exemplos da planilha. A proveniência, a ressalva sobre a consolidação vigente da Resolução CMN 4.966 e os checksums estão em [`references/README.md`](references/README.md).
 
 ## O que o CreditRisk+ modela
 
@@ -375,6 +380,7 @@ credit-risk-plus/
 │   ├── model.py              # fachada orientada a objetos
 │   ├── variable_model.py     # compatibilidade legada com aviso de depreciação
 │   ├── retail.py             # simulação longitudinal da carteira PF
+│   ├── vasicek_irb.py        # modelo de um fator, capital IRB e contribuições Euler
 │   ├── data.py               # portfólios dos exemplos oficiais
 │   └── plots.py              # funções auxiliares de visualização
 ├── notebooks/
@@ -387,8 +393,17 @@ credit-risk-plus/
 │   ├── 07_exemplo_2_setores_geo.ipynb
 │   ├── 08_exemplo_3_setores_fracionarios.ipynb
 │   ├── 11_safras_pf_brasil_creditriskplus.ipynb
+│   ├── 12_vasicek_irb_pf.ipynb
 │   └── README.md             # parecer individual dos notebooks
+├── scripts/
+│   └── build_notebook_12.py  # fonte reprodutível do notebook Vasicek/IRB
 ├── references/
+│   ├── README.md             # proveniência e checksums dos documentos
+│   ├── BCB_Relatorio_Economia_Bancaria_2023.pdf
+│   ├── BCB_Resolucao_303_2023_IRB.pdf
+│   ├── BIS_Basel_Framework_consolidated.pdf
+│   ├── BCBS_IRB_Risk_Weight_Functions_Explanatory_Note_2005.pdf
+│   ├── CMN_Resolucao_4966_2021_DOU_original.pdf
 │   ├── CreditRisk+.pdf
 │   └── CreditRisk+.xls
 ├── wiki/                     # documentação temática complementar
@@ -401,7 +416,7 @@ credit-risk-plus/
 
 ## Roteiro dos notebooks
 
-Os notebooks 01–03 apresentam a teoria, 04–08 reproduzem os exemplos oficiais e o notebook 11 aplica o modelo a uma carteira PF longitudinal.
+Os notebooks 01–03 apresentam a teoria, 04–08 reproduzem os exemplos oficiais, o notebook 11 aplica o CreditRisk+ a uma carteira PF longitudinal e o notebook 12 reutiliza essa carteira no modelo Vasicek/IRB.
 
 ### 01 — Introdução
 
@@ -480,6 +495,25 @@ Se os limites configurados não forem atendidos, `run_creditriskplus_over_time` 
 Originação e eventos de performance usam fluxos pseudoaleatórios independentes. Assim, ampliar o horizonte de vintage não altera defaults já realizados nos 24 meses reportados. Todas as curvas chegam ao mesmo MOB 60; as antigas aparecem mais transparentes e as recentes mais opacas.
 
 O cartão não possui vencimento contratual e pode continuar acumulando defaults depois do MOB 60. O horizonte comum remove censura desigual, mas não impõe artificialmente um platô.
+
+### 12 — Vasicek/IRB e capital marginal
+
+[Abrir notebook](notebooks/12_vasicek_irb_pf.ipynb)
+
+Reutiliza literalmente a configuração e a semente do notebook 11, mas aplica o modelo gaussiano de um fator e as funções IRB de varejo da Resolução BCB 303. O estudo contém:
+
+- derivação da variável latente e da PD condicional a um fator macroeconômico `W`;
+- prova numérica de que a média das PDs condicionais recupera a PD incondicional;
+- separação entre PD de longo prazo (TTC) e PD cíclica (PIT);
+- correlação fixa de 4% para cartão sob hipótese QRRE e correlação dependente da PD para parcelados classificados como demais varejo;
+- aplicação explícita dos pisos de PD e LGD do cenário regulatório;
+- EL, perda condicional no percentil de 99,9%, capital inesperado e RWA em 24 fechamentos;
+- contribuição marginal por real de EAD e contribuição Euler de cada contrato ativo;
+- reconciliação exata entre contratos, pools, segmentos e carteira;
+- cenários do fator sistemático, sensibilidade à classificação QRRE e validação Monte Carlo do quantil ASRF;
+- gráficos temporais, decomposições, heatmap, curva de concentração e superfícies de sensibilidade.
+
+O notebook trata o cartão como QRRE apenas para construir o cenário principal e calcula também a alternativa conservadora de “demais varejo”. Os dados sintéticos não comprovam elegibilidade regulatória, não constituem calibração aprovada de PD/LGD/EAD e não incorporam risco de concentração finita. Essas limitações aparecem antes dos cálculos e nas conclusões, em vez de serem absorvidas por ajustes ad hoc.
 
 ## Notebooks excluídos
 

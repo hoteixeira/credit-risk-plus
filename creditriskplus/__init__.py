@@ -9,6 +9,14 @@ from .simple_model import (
     calculate_loss_distribution_detailed,
     loss_quantile,
 )
+from .vasicek_irb import (
+    VasicekIRBResult,
+    calculate_vasicek_irb,
+    conditional_default_probability,
+    conditional_portfolio_loss,
+    downturn_default_probability,
+    retail_asset_correlation,
+)
 from . import data
 from . import plots
 
@@ -21,6 +29,12 @@ __all__ = [
     "calculate_loss_distribution",
     "calculate_loss_distribution_detailed",
     "loss_quantile",
+    "VasicekIRBResult",
+    "calculate_vasicek_irb",
+    "conditional_default_probability",
+    "conditional_portfolio_loss",
+    "downturn_default_probability",
+    "retail_asset_correlation",
     "data",
     "plots",
 ]

@@ -18,6 +18,11 @@ from creditriskplus.retail import (
     simulate_retail_portfolio,
     validate_portfolio_regime,
 )
+from creditriskplus.vasicek_irb import (
+    calculate_vasicek_irb,
+    conditional_default_probability,
+    retail_asset_correlation,
+)
 from extract_expected import PMF_PRINT_TOLERANCE, extract_references
 
 
@@ -171,6 +176,82 @@ class CreditRiskPlusMathematicalTests(unittest.TestCase):
             contributions["risk_contribution_std"].sum() / model.loss_std,
             1.0,
             places=12,
+        )
+
+
+class VasicekIRBMathematicalTests(unittest.TestCase):
+    """Verifica identidades analíticas centrais do modelo de um fator."""
+
+    def test_conditional_pd_integrates_to_unconditional_pd(self):
+        """Integra numericamente E[P(D|W)] = PD por Gauss-Hermite."""
+
+        nodes, weights = np.polynomial.hermite.hermgauss(80)
+        factors = np.sqrt(2.0) * nodes
+        pd = np.array([0.001, 0.01, 0.10, 0.40])
+        correlation = np.array([0.04, 0.12, 0.16, 0.03])
+        integrated = []
+        for probability, rho in zip(pd, correlation):
+            conditional = conditional_default_probability(
+                np.full_like(factors, probability),
+                np.full_like(factors, rho),
+                factors,
+            )
+            integrated.append(np.dot(weights, conditional) / np.sqrt(np.pi))
+        np.testing.assert_allclose(integrated, pd, rtol=2e-12, atol=2e-14)
+
+    def test_retail_correlation_matches_regulatory_limits(self):
+        """Confere QRRE fixo e os limites de demais varejo (16% a 3%)."""
+
+        self.assertEqual(retail_asset_correlation([0.02], "qrre")[0], 0.04)
+        other = retail_asset_correlation([1e-10, 0.999999], "other_retail")
+        np.testing.assert_allclose(other, [0.16, 0.03], atol=5e-9, rtol=0)
+
+    def test_pool_multiplicity_equals_contract_expansion(self):
+        """Prova numericamente que pools homogêneos preservam capital e RWA."""
+
+        pd = np.array([0.01, 0.08])
+        ead = np.array([2_000.0, 9_000.0])
+        lgd = np.array([0.85, 0.78])
+        rho = retail_asset_correlation(pd, ["qrre", "other_retail"])
+        counts = np.array([3, 4])
+        grouped = calculate_vasicek_irb(pd, ead, lgd, rho, counts)
+        expanded = calculate_vasicek_irb(
+            np.repeat(pd, counts),
+            np.repeat(ead, counts),
+            np.repeat(lgd, counts),
+            np.repeat(rho, counts),
+        )
+        self.assertAlmostEqual(grouped.total_capital, expanded.total_capital, places=10)
+        self.assertAlmostEqual(grouped.total_rwa, expanded.total_rwa, places=9)
+
+    def test_euler_contribution_matches_finite_difference(self):
+        """Compara dCapital/dEAD à taxa marginal analítica de cada contrato."""
+
+        pd = np.array([0.02, 0.12])
+        ead = np.array([4_000.0, 11_000.0])
+        lgd = np.array([0.85, 0.78])
+        rho = retail_asset_correlation(pd, ["qrre", "other_retail"])
+        base = calculate_vasicek_irb(pd, ead, lgd, rho)
+        step = 0.01
+        for index in range(len(ead)):
+            bumped_ead = ead.copy()
+            bumped_ead[index] += step
+            bumped = calculate_vasicek_irb(pd, bumped_ead, lgd, rho)
+            derivative = (bumped.total_capital - base.total_capital) / step
+            self.assertAlmostEqual(
+                derivative, base.marginal_capital_per_ead[index], places=8
+            )
+
+    def test_capital_reconciles_adverse_loss_minus_expected_loss(self):
+        """Impõe a identidade contábil fundamental do capital inesperado."""
+
+        result = calculate_vasicek_irb(
+            [0.01, 0.05], [3_000.0, 8_000.0], [0.85, 0.78], [0.04, 0.10], [10, 5]
+        )
+        self.assertAlmostEqual(
+            result.total_capital,
+            result.total_adverse_loss - result.total_expected_loss,
+            places=10,
         )
 
 
