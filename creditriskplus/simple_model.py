@@ -531,6 +531,35 @@ def loss_quantile(
     return (index - 1 + fraction) * float(unit_size)
 
 
+def systematic_risk_term(
+    sector_parameters: Sequence[SectorParameters],
+    sector_weights: np.ndarray,
+) -> np.ndarray:
+    """Calcula ``S_A = sum_k (sigma_k/mu_k)^2 * epsilon_k * theta_Ak`` da equação 121.
+
+    Este é o termo que distingue a contribuição de risco da simples perda esperada:
+    ele mede o quanto a contraparte ``A`` é exposta à variação conjunta dos fatores
+    sistemáticos. Uma carteira sem volatilidade de fator tem ``S_A = 0`` e a
+    contribuição colapsa no termo de severidade individual.
+
+    ``sector_weights`` tem formato ``(N, K)`` e o retorno tem tamanho ``N``, ambos
+    expressos em unidades de perda ``L``.
+    """
+
+    systematic = np.zeros(sector_weights.shape[0], dtype=np.float64)
+    for sector_index, parameters in enumerate(sector_parameters):
+        if parameters.mean_defaults <= 0:
+            continue
+        # (sigma_k/mu_k)^2 é o quadrado do coeficiente de variação do fator k.
+        cv_squared = (parameters.std_defaults / parameters.mean_defaults) ** 2
+        systematic += (
+            cv_squared
+            * parameters.expected_loss_units
+            * sector_weights[:, sector_index]
+        )
+    return systematic
+
+
 def analytic_loss_moments(
     exposures,
     mean_default_rates,

@@ -18,7 +18,7 @@ from creditriskplus.retail import (
     simulate_retail_portfolio,
     validate_portfolio_regime,
 )
-from extract_expected import extract_kpis
+from extract_expected import PMF_PRINT_TOLERANCE, extract_references
 
 
 class CreditRiskPlusMathematicalTests(unittest.TestCase):
@@ -174,69 +174,177 @@ class CreditRiskPlusMathematicalTests(unittest.TestCase):
         )
 
 
+def _example_portfolios():
+    """Descreve cada aba do XLS: carteira, setores e setor específico."""
+
+    example_2 = data.create_example_2_3sector_portfolio()
+    example_3 = data.create_example_3_4sector_portfolio()
+    return {
+        "Example1A": (data.create_example_1a_portfolio(), None, None),
+        "Example1B": (data.create_example_1a_23_obligor_portfolio(), None, None),
+        "Example1C": (data.create_example_1c_portfolio(), None, None),
+        "Example2": (example_2, _sector_columns(example_2), None),
+        "Example3": (example_3, _sector_columns(example_3), "sector_weight_Specific"),
+    }
+
+
+def _sector_columns(portfolio):
+    """Lista, em ordem, as colunas de alocação setorial de uma carteira."""
+
+    return [column for column in portfolio if column.startswith("sector_weight_")]
+
+
 class SpreadsheetRegressionTests(unittest.TestCase):
-    """Compara os quatro exemplos de um ano com os outputs do XLS oficial."""
+    """Compara os cinco exemplos com tudo o que o XLS oficial publica."""
 
     @classmethod
     def setUpClass(cls):
-        """Lê uma vez os KPIs gravados no arquivo de referência."""
+        """Lê uma vez os valores gravados no arquivo de referência."""
 
-        cls.references = extract_kpis()
+        cls.references = extract_references()
+        cls.examples = _example_portfolios()
 
-    def _assert_example(self, sheet, portfolio, weights=None, idiosyncratic=None):
-        """Executa uma regressão de EL, VaR interpolado e massa de cauda."""
+    def _distribution(self, sheet):
+        """Calcula a distribuição do exemplo com folga de cauda suficiente."""
 
-        result = calculate_loss_distribution_detailed(
+        portfolio, columns, specific = self.examples[sheet]
+        return calculate_loss_distribution_detailed(
             portfolio.exposure,
             portfolio.mean_default_rate,
             portfolio.std_default_rate,
             np.zeros(len(portfolio)),
-            sector_weights_matrix=weights,
-            idiosyncratic_sector_indices=idiosyncratic,
+            sector_weights_matrix=portfolio[columns].to_numpy() if columns else None,
+            idiosyncratic_sector_indices=[columns.index(specific)] if specific else None,
             max_loss_dollars=250_000_000,
         )
-        reference = self.references[sheet]
-        self.assertAlmostEqual(result.expected_loss, reference["EL"], delta=0.51)
+
+    def test_expected_loss_matches_every_example(self):
+        """A perda esperada é aditiva e deve bater à unidade monetária."""
+
+        for sheet in self.examples:
+            with self.subTest(sheet=sheet):
+                result = self._distribution(sheet)
+                self.assertAlmostEqual(
+                    result.expected_loss,
+                    self.references[sheet].expected_loss,
+                    delta=0.51,
+                )
+                self.assertLess(result.tail_mass_upper_bound, 3e-7)
+
+    def test_published_loss_distribution_matches_point_by_point(self):
+        """Confere a PMF inteira, e não apenas alguns quantis dela.
+
+        A planilha publica a distribuição ponto a ponto na grade ``n * L``. Bater
+        em todos os pontos é a validação mais forte disponível: qualquer erro na
+        recursão, no banding ou na convolução setorial apareceria aqui antes de
+        aparecer em um percentil isolado.
+        """
+
+        for sheet, reference in self.references.items():
+            with self.subTest(sheet=sheet):
+                result = self._distribution(sheet)
+                # A grade publicada é exatamente a grade do modelo.
+                spacing = np.diff(reference.loss_amounts)
+                np.testing.assert_allclose(spacing, result.unit_size)
+                index = np.round(reference.loss_amounts / result.unit_size).astype(int)
+                np.testing.assert_allclose(
+                    result.pmf[index],
+                    reference.loss_probabilities,
+                    rtol=0.0,
+                    atol=PMF_PRINT_TOLERANCE,
+                )
+
+    def test_every_published_percentile_matches(self):
+        """Valida os oito percentis de cada exemplo, não apenas o de 99%.
+
+        A comparação usa a interpolação linear da própria planilha. O quantil
+        discreto continua sendo o padrão da API e cai no ponto adjacente da grade.
+        """
+
+        for sheet, reference in self.references.items():
+            with self.subTest(sheet=sheet):
+                result = self._distribution(sheet)
+                for level, expected in reference.percentiles.items():
+                    with self.subTest(percentile=level):
+                        self.assertAlmostEqual(
+                            result.quantile(level / 100.0, interpolate=True),
+                            expected,
+                            delta=1.0,
+                        )
+
+    def test_standard_deviation_matches_the_manual(self):
+        """Confere o desvio padrão publicado no Apêndice B do manual."""
+
+        # Manual CSFB 1997, seção B3.4: 12.668.742 para o Exemplo 1A.
+        portfolio = data.create_example_1a_portfolio()
+        _, variance = analytic_loss_moments(
+            portfolio.exposure,
+            portfolio.mean_default_rate,
+            portfolio.std_default_rate,
+            np.zeros(len(portfolio)),
+        )
+        self.assertAlmostEqual(float(np.sqrt(variance)), 12_668_742.0, delta=1.0)
+
+    def test_risk_contributions_reproduce_the_spreadsheet(self):
+        """Reproduz a coluna de contribuições publicada em cada exemplo anual.
+
+        A tolerância de 0,001% é o arredondamento dos próprios inteiros impressos
+        na planilha: um erro de uma unidade sobre uma contribuição de 200 mil já
+        vale 0,0005%.
+        """
+
+        for sheet in ("Example1A", "Example1B", "Example2", "Example3"):
+            with self.subTest(sheet=sheet):
+                portfolio, columns, specific = self.examples[sheet]
+                model = CreditRiskPlus(max_loss_units=20_000)
+                model.set_portfolio(
+                    portfolio,
+                    sector_columns=columns,
+                    idiosyncratic_sector_columns=[specific] if specific else None,
+                )
+                model.calculate_loss_distribution()
+                contributions = model.calculate_risk_contributions(
+                    99, convention="spreadsheet"
+                )["risk_contribution_99pct"].to_numpy()
+                expected = self.references[sheet].obligor_risk_contributions
+                np.testing.assert_allclose(
+                    contributions, expected[: len(contributions)], rtol=1e-5
+                )
+
+    def test_manual_convention_stays_additive_and_differs_knowingly(self):
+        """A convenção do manual soma a sigma e não deve virar a da planilha."""
+
+        portfolio, _, _ = self.examples["Example1A"]
+        model = CreditRiskPlus(max_loss_units=20_000)
+        model.set_portfolio(portfolio)
+        model.calculate_loss_distribution()
+        manual = model.calculate_risk_contributions(99)
+        spreadsheet = model.calculate_risk_contributions(99, convention="spreadsheet")
+
+        # Equação 123: a decomposição do manual fecha exatamente em sigma.
         self.assertAlmostEqual(
-            result.quantile(0.99, interpolate=True),
-            reference["VaR99"],
-            delta=1.0,
+            manual["risk_contribution_std"].sum() / model.loss_std, 1.0, places=12
         )
-        self.assertLess(result.tail_mass_upper_bound, 3e-7)
-
-    def test_example_1a(self):
-        """Valida a carteira de 25 contrapartes e um fator."""
-
-        self._assert_example("Example1A", data.create_example_1a_portfolio())
-
-    def test_example_1b(self):
-        """Valida a retirada das duas maiores exposições."""
-
-        self._assert_example("Example1B", data.create_example_1a_23_obligor_portfolio())
-
-    def test_example_1c(self):
-        """Valida o perfil virtual de três anos da planilha."""
-
-        self._assert_example("Example1C", data.create_example_1c_portfolio())
-
-    def test_example_2(self):
-        """Valida três setores geográficos exclusivos."""
-
-        portfolio = data.create_example_2_3sector_portfolio()
-        columns = [column for column in portfolio if column.startswith("sector_weight_")]
-        self._assert_example("Example2", portfolio, portfolio[columns].to_numpy())
-
-    def test_example_3_specific_sector(self):
-        """Valida pesos fracionários e o limite Poisson do setor específico."""
-
-        portfolio = data.create_example_3_4sector_portfolio()
-        columns = [column for column in portfolio if column.startswith("sector_weight_")]
-        self._assert_example(
-            "Example3",
-            portfolio,
-            portfolio[columns].to_numpy(),
-            [columns.index("sector_weight_Specific")],
+        # A da planilha fecha por construção, porque é reescalada.
+        self.assertAlmostEqual(
+            spreadsheet["risk_contribution_std"].sum() / model.loss_std, 1.0, places=12
         )
+        # As duas divergem por contraparte onde o arredondamento de banda é maior.
+        divergence = (
+            manual["risk_contribution_99pct"] / spreadsheet["risk_contribution_99pct"]
+            - 1.0
+        ).abs().max()
+        self.assertGreater(divergence, 0.01)
+
+    def test_unknown_risk_contribution_convention_is_rejected(self):
+        """Um nome de convenção inválido deve falhar em vez de escolher um padrão."""
+
+        portfolio, _, _ = self.examples["Example1A"]
+        model = CreditRiskPlus(max_loss_units=20_000)
+        model.set_portfolio(portfolio)
+        model.calculate_loss_distribution()
+        with self.assertRaisesRegex(ValueError, "convention"):
+            model.calculate_risk_contributions(99, convention="excel")
 
 
 class MatureRetailPortfolioTests(unittest.TestCase):

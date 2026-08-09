@@ -492,15 +492,29 @@ As justificativas completas estão em [notebooks/README.md](notebooks/README.md)
 
 ## Regressão contra a planilha oficial
 
-Os valores abaixo são os KPIs gravados no XLS. A comparação de VaR usa somente a interpolação linear da planilha; a API econômica continua usando o quantil discreto.
+A validação não se limita a dois KPIs por exemplo. É confrontado tudo o que a planilha e o manual publicam — inclusive a distribuição inteira, ponto a ponto.
 
-| Exemplo | EL oficial | VaR99 oficial | Tolerância automatizada |
-|---|---:|---:|---:|
-| 1A | 14.221.863 | 55.311.503 | menor que 1 unidade monetária |
-| 1B | 11.162.856 | 39.946.857 | menor que 1 unidade monetária |
-| 1C | 17.277.632 | 62.100.307 | menor que 1 unidade monetária |
-| 2 | 14.221.863 | 49.931.502 | menor que 1 unidade monetária |
-| 3 | 14.221.863 | 47.368.235 | menor que 1 unidade monetária |
+| Verificação | Cobertura | Tolerância automatizada |
+|---|---|---|
+| PMF publicada, ponto a ponto | 5 exemplos, 2.331 pontos de grade | 5×10⁻⁷ (precisão de impressão do XLS) |
+| Percentis publicados | 5 exemplos × 8 percentis | menor que 1 unidade monetária |
+| Perda esperada | 5 exemplos | menor que 1 unidade monetária |
+| Desvio padrão (manual, B3.4) | Exemplo 1A: 12.668.742 | menor que 1 |
+| Contribuições de risco | 1A, 1B, 2 e 3 — 98 contrapartes | erro relativo menor que 10⁻⁵ |
+
+KPIs de referência por exemplo:
+
+| Exemplo | EL oficial | VaR99 oficial |
+|---|---:|---:|
+| 1A | 14.221.863 | 55.311.503 |
+| 1B | 11.162.856 | 39.946.857 |
+| 1C | 17.277.632 | 62.100.307 |
+| 2 | 14.221.863 | 49.931.502 |
+| 3 | 14.221.863 | 47.368.235 |
+
+A comparação de VaR usa a interpolação linear da planilha; a API econômica continua usando o quantil discreto por padrão.
+
+As contribuições de risco têm duas convenções, porque a equação 121 do manual não especifica se a PD é a bruta do rating ou a compensada pelo banding. `convention="manual"` (padrão) usa a compensada e é aditiva por construção; `convention="spreadsheet"` reproduz o XLS. A diferença por contraparte chega a 5% e está documentada em [AUDITORIA_TECNICA.md](AUDITORIA_TECNICA.md) seção 6.1.
 
 ## Testes e reprodução
 
@@ -519,10 +533,14 @@ A suíte cobre, entre outros pontos:
 5. equivalência entre API funcional e classe;
 6. equivalência entre pools homogêneos e expansão linha a linha;
 7. subfluxo numérico de \(A_0\) em carteiras grandes;
-8. cinco regressões oficiais da planilha;
-9. maturidade do backbook PF;
-10. horizonte comum de MOB 60;
-11. invariância dos eventos reportados quando o horizonte de vintage é ampliado.
+8. a PMF publicada dos cinco exemplos, ponto a ponto;
+9. os quarenta percentis publicados;
+10. o desvio padrão impresso no manual;
+11. as contribuições de risco publicadas, na convenção da planilha;
+12. aditividade da convenção do manual e rejeição de convenções desconhecidas;
+13. maturidade do backbook PF;
+14. horizonte comum de MOB 60;
+15. invariância dos eventos reportados quando o horizonte de vintage é ampliado.
 
 Execute todos os notebooks em memória:
 

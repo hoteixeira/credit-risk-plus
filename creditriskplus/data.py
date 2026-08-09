@@ -1,15 +1,31 @@
-"""
-Módulo de dados para o modelo Credit Risk+.
+"""Carteiras e tabelas de rating dos exemplos oficiais do CreditRisk+.
 
-Carrega dados de portfólio, tabelas de ratings e configurações de setores.
+Todos os números deste módulo são transcrições literais do manual do Credit
+Suisse First Boston (1997) e da planilha `references/CreditRisk+.xls`. Eles não
+são calibrações nem estimativas: existem para que os exemplos publicados possam
+ser reproduzidos exatamente e usados como regressão.
+
+Cada contraparte precisa de três informações para entrar no modelo:
+
+* a exposição, que define o tamanho da perda caso ela quebre;
+* a taxa média de default, que é a probabilidade anual de que isso ocorra;
+* a volatilidade dessa taxa, que mede o quanto a média pode variar de um ano
+  para o outro por razões sistemáticas — é ela que engorda a cauda da
+  distribuição e separa o CreditRisk+ de um modelo Poisson simples.
+
+O manual adverte que as taxas destes exemplos são deliberadamente altas e
+servem apenas para ilustração.
 """
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
 
-# Tabela de taxas de default por rating (Exemplo do documento)
-# Significa: para cada rating, temos a taxa média anual de default e sua volatilidade (desvio padrão)
+# Tabela 9 do manual: mapeamento de rating para taxa média de default e sua
+# volatilidade. Note que, em todas as linhas, a volatilidade é exatamente metade
+# da média. Na notação do Apêndice A isso é sigma_A/p_A = 0,5, a razão que a
+# seção A7.3 chama de "flat ratio" e que, pela equação 44, se propaga para o
+# setor inteiro como sigma_k = 0,5 * mu_k.
 RATING_TABLE = {
     'A': {'mean': 0.015, 'std': 0.0075},      # 1.5% média, 0.75% volatilidade
     'B': {'mean': 0.016, 'std': 0.0080},      # 1.6% média, 0.80% volatilidade
@@ -21,8 +37,13 @@ RATING_TABLE = {
     'H': {'mean': 0.300, 'std': 0.1500},      # 30.0% média, 15.00% volatilidade
 }
 
-# Tabela multi-ano: taxas de default marginais (ano-condicional) para Exemplo 1C
-# Estrutura a termo das taxas de default
+# Estrutura a termo do Exemplo 1C, transcrita da aba Example1C do XLS.
+# São taxas marginais: a probabilidade de a contraparte quebrar durante o ano t,
+# dado que sobreviveu aos anos anteriores. A seção A5.2 exige justamente taxas
+# marginais, porque a construção de contrapartes virtuais da seção A5.3 supõe
+# que defaults da mesma contraparte em anos diferentes são mutuamente exclusivos.
+# Ratings ruins têm taxas decrescentes ao longo dos anos porque quem sobrevive
+# ao primeiro ano já demonstrou resiliência; ratings bons têm o padrão inverso.
 MULTI_YEAR_RATING_TABLE = {
     'A': {
         'year_1': {'mean': 0.015, 'std': 0.0075},
@@ -69,7 +90,7 @@ MULTI_YEAR_RATING_TABLE = {
 
 def load_portfolio_from_xls(xls_path, sheet_name='Exposures&StaticData'):
     """
-    Carrega portfólio de contrapartees do arquivo XLS.
+    Carrega portfólio de contrapartes do arquivo XLS.
 
     Parâmetros:
     -----------
@@ -144,7 +165,17 @@ def get_default_rates(rating, year=None, multi_year=False):
 
 def create_example_1a_portfolio():
     """
-    Cria o portfólio de Example 1A (25 contrapartees, 1 setor, taxas variáveis).
+    Cria o portfólio de Example 1A (25 contrapartes, 1 setor, taxas variáveis).
+
+    Transcrição da Tabela 8 do manual. As exposições já são líquidas de
+    recuperação, como o próprio manual declara na seção B2 ("The exposure
+    amounts are net of recovery"), por isso os exemplos rodam com recuperação
+    zero. Todas as contrapartes ficam no mesmo fator de economia geral, o que
+    torna esta a carteira mais concentrada dos exemplos: não há diversificação
+    entre fatores para reduzir a cauda.
+
+    Valores publicados para conferência: exposição agregada 130.513.072,
+    perda esperada 14.221.863 e desvio padrão 12.668.742.
 
     Retorna:
     --------
@@ -196,15 +227,20 @@ def create_example_1a_portfolio():
 
 def create_example_1a_23_obligor_portfolio():
     """
-    Cria o portfólio de Example 1B (25 contrapartees menos 24 e 25 = 23 contrapartees).
+    Cria o portfólio de Example 1B (25 contrapartes menos 24 e 25 = 23 contrapartes).
+
+    O manual usa este exemplo, na seção B3.7, para mostrar que gerenciar risco de
+    crédito não é o mesmo que reduzir exposição: as duas contrapartes retiradas
+    respondem por 21,5% da perda esperada mas por 27,8% do percentil de 99%.
+    Concentração custa capital mais do que proporcionalmente.
 
     Retorna:
     --------
     pd.DataFrame
-        Portfólio com 23 contrapartees
+        Portfólio com 23 contrapartes
     """
     portfolio = create_example_1a_portfolio()
-    # Remove contrapartees 24 e 25
+    # Remove contrapartes 24 e 25
     return portfolio[portfolio['obligor_id'] <= 23].reset_index(drop=True)
 
 
@@ -212,6 +248,13 @@ def create_example_2_3sector_portfolio():
     """
     Cria portfólio de Example 2 (3 setores geográficos: EUA, Japão, Europa).
     Alocação exclusiva (hard allocation).
+
+    É o caso da seção A7 do manual: cada contraparte pertence a exatamente um
+    setor, ou seja, os pesos são a função delta da equação 91. Como os três
+    fatores são independentes, a distribuição total é a convolução das três
+    distribuições setoriais. A mesma carteira do Exemplo 1A tem aqui um VaR de
+    99% menor (49,9 contra 55,3 milhões) sem que nada na exposição mude: a
+    diferença é puro benefício de diversificação entre fatores.
 
     Retorna:
     --------
@@ -266,6 +309,14 @@ def create_example_3_4sector_portfolio():
     Cria portfólio de Example 3 (4 setores: Específico, EUA, Japão, Europa).
     Alocação fracionária (pesos somam a 1.0 para cada contraparte).
 
+    É a análise setorial generalizada da seção A12: cada contraparte sofre
+    influência de vários fatores ao mesmo tempo, com pesos ``theta_Ak`` que somam
+    um (equação 90). O setor "Specific" recebe o tratamento de A12.3 — mantém sua
+    contribuição de média mas tem a volatilidade zerada, representando o limite de
+    muitos fatores idiossincráticos independentes que se cancelam na carteira.
+    Por isso este exemplo tem o menor VaR dos três (47,4 milhões): parte da
+    volatilidade deixa de ser sistemática.
+
     Retorna:
     --------
     pd.DataFrame
@@ -319,8 +370,14 @@ def create_example_1c_portfolio():
     """
     Cria o portfólio de virtual de Example 1C (horizonte 3 anos, 40 contrapartes virtuais).
 
-    Cada contraparte (contraparte, ano) é tratada como uma contraparte virtual independente
+    Cada par (contraparte, ano) é tratado como uma contraparte virtual independente
     com sua exposição específica do ano e taxa marginal condicional de default.
+
+    A justificativa está na seção A5.3: como defaults da mesma contraparte em anos
+    diferentes são mutuamente exclusivos, a PGF multi-ano da equação 36 tem
+    exatamente a mesma forma da PGF anual da equação 17. A recursão anual, portanto,
+    vale sem alteração. O truque é contábil, não estatístico: ele não modela
+    migração de rating nem dependência temporal entre os anos.
 
     O perfil de exposição por ano reflete amortizações e vencimentos de créditos:
     - Ano 1: todas as 25 contrapartes originais

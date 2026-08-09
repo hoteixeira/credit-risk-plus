@@ -198,10 +198,18 @@ $$
 com:
 
 $$
-\mu = \sum_A \frac{\varepsilon_A}{\nu_A} = \sum_A p_A
+\mu = \sum_A \frac{\varepsilon_A}{\nu_A} \approx \sum_A p_A
 $$
 
-pois $\varepsilon_A / \nu_A = p_A E_A^{\text{net}} / (L \nu_A) \approx p_A$ quando o arredondamento para bandas é pequeno.
+A igualdade é apenas aproximada, e a distinção importa. O que entra na recursão é a **PD compensada**
+
+$$
+\mu_A = \frac{\varepsilon_A}{\nu_A} = p_A \cdot \frac{E_A^{\text{net}} / L}{\nu_A} \le p_A ,
+$$
+
+que é menor que $p_A$ porque $\nu_A = \lceil E_A^{\text{net}}/L \rceil$ arredonda a exposição para cima. Essa é exatamente a "compensating rounding adjustment" exigida pela equação 12 do manual: sem ela, o banding inflaria a perda esperada. Com ela, $\nu_A \mu_A = \varepsilon_A$ e a perda esperada fica idêntica à da carteira original.
+
+A aproximação $\mu_A \approx p_A$ só é boa quando $L$ é pequeno em relação às exposições. Na carteira do Exemplo 1A, a contraparte 1 tem $E^{\text{net}}/L = 1{,}77$ e $\nu = 2$, logo sua PD compensada é 13% menor que a PD do rating. É essa diferença que separa as duas convenções de contribuição de risco documentadas em [Validação](10-Validacao).
 
 ---
 

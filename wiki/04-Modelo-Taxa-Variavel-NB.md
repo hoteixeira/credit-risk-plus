@@ -256,7 +256,17 @@ Quando $\sigma_k \to 0$:
 - $\beta_k = \sigma_k^2 / \mu_k \to 0$
 - $p_k = \beta_k / (1 + \beta_k) \to 0$
 - $\alpha_k = \mu_k^2 / \sigma_k^2 \to \infty$
-- $\alpha_k p_k = \mu_k$ (permanece constante)
+- $\alpha_k p_k = \dfrac{\mu_k}{1 + \beta_k} \to \mu_k$
+
+O último item é um **limite**, não uma identidade: para $\beta_k > 0$ o produto vale $\mu_k/(1+\beta_k)$, estritamente menor que $\mu_k$. Ele só converge para $\mu_k$ quando $\beta_k \to 0$.
+
+Essa distinção tem consequência numérica direta. O produto $\alpha_k p_k$ é da forma $\infty \times 0$, e calculá-lo literalmente perde precisão justamente no regime de baixa volatilidade. Por isso a implementação nunca forma esse produto: ela usa as identidades algébricas exatas
+
+$$
+\frac{\alpha_k p_k}{\mu_k} = \frac{1}{1 + \beta_k}, \qquad \frac{p_k}{\mu_k} = \frac{\beta_k}{\mu_k (1 + \beta_k)},
+$$
+
+que são estáveis em toda a faixa de $\beta_k$ e degeneram suavemente no caso Poisson.
 
 ### 5.2 Limite da PGF
 

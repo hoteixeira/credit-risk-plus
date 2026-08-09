@@ -14,9 +14,11 @@ import pandas as pd
 
 from .simple_model import (
     LossDistributionResult,
+    _compute_unit_size,
     analytic_loss_moments,
     calculate_loss_distribution_detailed,
     loss_quantile,
+    systematic_risk_term,
 )
 
 
@@ -142,8 +144,8 @@ class CreditRiskPlus:
         exposures, mean_rates, std_rates, recoveries, weights = self._portfolio_arrays()
         effective_unit = self.unit_size
         if effective_unit is None:
-            net = exposures * (1.0 - recoveries)
-            effective_unit = float(np.ceil(np.max(net) / 100.0))
+            # Mesma regra do XLS oficial, com a guarda de exposição positiva.
+            effective_unit = _compute_unit_size(exposures * (1.0 - recoveries))
 
         result = calculate_loss_distribution_detailed(
             exposures,
@@ -211,39 +213,65 @@ class CreditRiskPlus:
         self._require_result()
         return self.get_percentile_loss(percentile) - self.expected_loss
 
-    def calculate_risk_contributions(self, percentile: float = 99.0) -> pd.DataFrame:
+    def calculate_risk_contributions(
+        self,
+        percentile: float = 99.0,
+        *,
+        convention: str = "manual",
+    ) -> pd.DataFrame:
         """Calcula contribuições de risco das equações 121 e 102.
 
-        A contribuição ao desvio padrão é analítica e soma exatamente ao desvio
-        padrão, salvo arredondamento numérico. A contribuição a VaR é a
-        aproximação explicitamente proposta pelo manual na equação 102.
+        A contribuição ao desvio padrão responde "quanto do risco total desta
+        carteira vem desta contraparte". A contribuição ao percentil responde a
+        mesma pergunta para o capital, usando a aproximação aditiva da equação
+        102: ``RC_A = EL_A + xi * RC_sigma_A``, com ``xi = (VaR - EL)/sigma``.
+
+        Existem duas convenções porque a planilha oficial e o texto do manual
+        divergem em um ponto: qual PD entra na equação 121.
+
+        ``"manual"`` (padrão) usa a PD compensada pelo banding, ``epsilon_A/nu_A``,
+        que é o ``mu_A`` definido em A3.3 depois do arredondamento das bandas. Com
+        ela a identidade da equação 123 vale exatamente e as contribuições somam ao
+        desvio padrão sem nenhuma correção.
+
+        ``"spreadsheet"`` reproduz o arquivo `CreditRisk+.xls`, que usa a PD bruta
+        do rating e depois reescala o vetor para somar ao desvio padrão correto.
+        Essa convenção reproduz a coluna publicada com erro inferior a 0,001%, ou
+        seja, dentro do arredondamento dos inteiros impressos na planilha. Ela
+        existe para auditoria e regressão; nenhuma das duas é um erro da outra, e a
+        diferença por contraparte chega a 5% justamente onde o arredondamento de
+        banda é maior.
         """
+
+        if convention not in {"manual", "spreadsheet"}:
+            raise ValueError("convention deve ser 'manual' ou 'spreadsheet'.")
 
         self._require_result()
         exposures, mean_rates, _, recoveries, weights = self._portfolio_arrays()
         net = exposures * (1.0 - recoveries)
         exact_bands = net / self.unit_size
         bands = np.maximum(np.ceil(exact_bands).astype(int), 1)
-        epsilon_a = mean_rates * exact_bands
-        adjusted_pd = epsilon_a / bands
-        sigma_units = self.loss_std / self.unit_size
-
-        systematic = np.zeros(len(exposures), dtype=float)
-        for sector_index, parameters in enumerate(self.result.sector_parameters):
-            if parameters.mean_defaults <= 0:
-                continue
-            cv_squared = (parameters.std_defaults / parameters.mean_defaults) ** 2
-            systematic += (
-                cv_squared
-                * parameters.expected_loss_units
-                * weights[:, sector_index]
-            )
-
-        rc_std_units = bands * adjusted_pd * (bands + systematic) / sigma_units
-        rc_std = rc_std_units * self.unit_size
+        systematic = systematic_risk_term(self.result.sector_parameters, weights)
         expected_loss_contribution = net * mean_rates
 
-        var_loss = self.get_percentile_loss(percentile)
+        if convention == "manual":
+            # mu_A compensado: nu_A * mu_A = epsilon_A, o que faz a soma das
+            # contribuições fechar exatamente em sigma pela equação 123.
+            adjusted_pd = (mean_rates * exact_bands) / bands
+            rc_std = (
+                bands * adjusted_pd * (bands + systematic)
+                / (self.loss_std / self.unit_size)
+                * self.unit_size
+            )
+            var_loss = self.get_percentile_loss(percentile)
+        else:
+            # A planilha aplica a equação 121 com a PD bruta do rating. O vetor
+            # resultante não soma a sigma, e ela o reescala para que some.
+            unscaled = bands * mean_rates * (bands + systematic)
+            rc_std = self.loss_std * unscaled / unscaled.sum()
+            # A planilha também usa o VaR interpolado da própria grade em xi.
+            var_loss = self.get_percentile_loss(percentile, interpolate=True)
+
         multiplier = (var_loss - self.expected_loss) / self.loss_std
         rc_percentile = expected_loss_contribution + multiplier * rc_std
 

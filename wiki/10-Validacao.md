@@ -1,12 +1,14 @@
 # Validação
 
-A implementação deste repositório foi validada contra a planilha oficial `CreditRisk+.xls` do Credit Suisse. Esta página descreve os resultados e as fontes de discrepância.
+A implementação deste repositório foi validada contra as duas fontes primárias em `references/`: o manual *CreditRisk+ — A Credit Risk Management Framework* (Credit Suisse First Boston, 1997) e a planilha oficial `CreditRisk+.xls`. Esta página descreve o que foi confrontado, com que resultado e quais diferenças permanecem por definição.
 
 ---
 
 ## 1. Referência Oficial
 
-A planilha `references/CreditRisk+.xls` contém os exemplos numéricos originais do paper:
+O PDF do manual está gravado em formato MacBinary II: há 128 bytes de cabeçalho antes do marcador `%PDF`. Removido esse prefixo, o arquivo é o manual completo, com 72 páginas e o Apêndice A inteiro.
+
+A planilha `references/CreditRisk+.xls` contém os exemplos numéricos originais:
 
 - **Exemplo 1A**: 25 contrapartes, 1 setor (Economia Geral).
 - **Exemplo 1B**: 23 contrapartes (remoção das contrapartes 24 e 25).
@@ -14,29 +16,63 @@ A planilha `references/CreditRisk+.xls` contém os exemplos numéricos originais
 - **Exemplo 2**: 25 contrapartes divididas em 3 setores geográficos exclusivos.
 - **Exemplo 3**: 25 contrapartes divididas em 4 setores com pesos fracionários + setor específico.
 
+A planilha **não contém macro VBA nem XLM**. O manual explica por quê na seção B3.1: a implementação original era "a single spreadsheet together with an addin", e esse add-in era um arquivo separado, distribuído em 1997 pelo site do banco. Ele nunca esteve no repositório. Portanto, as colunas de saída do XLS são valores estáticos: são referência, não código executável.
+
 ---
 
 ## 2. Resultados de Validação
 
-| Exemplo | Descrição | E[Loss] (ref) | VaR(99%) (ref) | Erro EL | Erro VaR |
-|---------|-----------|--------------:|---------------:|:-------:|:--------:|
-| 1A | 25 contrapartes, 1 setor | \$14.221.863 | \$55.311.503 | 0,000% | 0,000% |
-| 1B | 23 contrapartes | \$11.162.856 | \$39.946.857 | 0,000% | 0,000% |
-| 1C | 25 contrapartes, 3 anos | \$17.277.632 | \$62.100.307 | 0,000% | 0,000% |
-| 2 | 3 setores geográficos | \$14.221.863 | \$49.931.502 | 0,000% | 0,000% |
-| 3 | 4 setores + específico | \$14.221.863 | \$47.368.235 | 0,000% | 0,000% |
+Cada linha abaixo é verificada automaticamente por `run_tests.py`.
+
+| Verificação | Cobertura | Resultado |
+|---|---|---|
+| Perda esperada | 5 exemplos | diferença < 1 unidade monetária |
+| PMF publicada, ponto a ponto | 5 exemplos, 2.331 pontos de grade | diferença ≤ 5×10⁻⁷ em todos os pontos |
+| Percentis publicados | 5 exemplos × 8 percentis = 40 valores | diferença < 1 unidade monetária |
+| Desvio padrão (manual, seção B3.4) | Exemplo 1A | 12.668.742, diferença < 1 |
+| Contribuições de risco | 1A, 1B, 2 e 3 — 98 contrapartes | erro relativo < 10⁻⁵ |
+
+A tolerância de 5×10⁻⁷ na PMF é a própria precisão de impressão da planilha: as probabilidades têm seis casas decimais, então dois valores só são distinguíveis acima de meia unidade da última casa. Bater em todos os pontos da distribuição é uma validação mais forte do que bater em alguns quantis, porque qualquer erro na recursão, no banding ou na convolução setorial apareceria na PMF antes de aparecer num percentil isolado.
+
+**Convenção de quantil.** Os percentis batem sob a interpolação linear que a própria planilha usa. A API continua devolvendo o quantil discreto por padrão, que é o VaR matemático de uma variável discreta; passe `interpolate=True` para reproduzir o XLS. Os dois diferem por menos de uma unidade $L$.
 
 ---
 
-## 3. Interpretação dos Erros
+## 3. Interpretação das Diferenças
 
-### 3.1 Casos anuais exatos (1A, 1B, 2 e 3)
+### 3.1 Exemplo 3: setor específico
 
-Nos quatro exemplos anuais, a diferença é inferior a uma unidade monetária para a EL e para o VaR interpolado segundo a convenção do XLS.
+Reproduzido aplicando diretamente A12.3: o setor específico conserva sua contribuição de média, mas recebe variância zero e converge ao caso Poisson de A11. A hipótese anterior de binomiais negativas individuais com $\alpha_A = 4$ não consta do manual e foi removida.
 
-### 3.2 Exemplo 3: setor específico
+### 3.2 Contribuições de risco: duas convenções legítimas
 
-O Exemplo 3 é reproduzido ao aplicar diretamente A12.3: o setor específico conserva sua contribuição de média, mas recebe variância zero e converge ao caso Poisson de A11. A hipótese anterior de NBs individuais com $\alpha_A=4$ não consta do manual e foi removida.
+A equação 121 do manual é
+
+$$
+RC_A = \frac{\nu_A \mu_A}{\sigma}\left( \nu_A + \sum_k \left(\frac{\sigma_k}{\mu_k}\right)^2 \varepsilon_k \theta_{Ak} \right),
+$$
+
+mas ela não diz explicitamente se $\mu_A$ é a PD bruta do rating ou a PD compensada pelo banding, $\varepsilon_A/\nu_A$. As duas leituras dão resultados diferentes, e a diferença chega a 5% por contraparte — exatamente nas exposições mais arredondadas para cima.
+
+O algoritmo da planilha foi recuperado a partir dos próprios números publicados. Duas evidências o determinam:
+
+- contrapartes que compartilham banda **e** rating têm contribuição ao desvio padrão **idêntica** (contrapartes 5 e 6, 9 e 10);
+- dentro de uma mesma banda, a razão entre contribuições é exatamente a razão das PDs brutas (contrapartes 13, 14 e 15, ratings D, H e F, na proporção 1 : 6 : 2).
+
+Isso só é possível se a planilha usar a **PD bruta**. O vetor resultante não soma ao desvio padrão, e a planilha o **reescala** para que some. O multiplicador $\xi$ usa o VaR de 99% interpolado.
+
+$$
+RC^{\sigma}_A = \sigma \cdot \frac{\nu_A\, p_A\,(\nu_A + S_A)}{\sum_B \nu_B\, p_B\,(\nu_B + S_B)}, \qquad S_A = \sum_k \left(\frac{\sigma_k}{\mu_k}\right)^2 \varepsilon_k \theta_{Ak}
+$$
+
+Ambas estão disponíveis:
+
+| `convention` | PD usada | Aditividade | Uso |
+|---|---|---|---|
+| `"manual"` (padrão) | compensada, $\varepsilon_A/\nu_A$ | exata pela equação 123, sem rescala | análise |
+| `"spreadsheet"` | bruta do rating | obtida por rescala | reprodução do XLS |
+
+Nenhuma é um erro da outra. A do manual é internamente consistente com a fórmula de variância da equação 118 que o mesmo código usa; a da planilha é o que produziu os números publicados.
 
 ---
 
@@ -44,39 +80,48 @@ O Exemplo 3 é reproduzido ao aplicar diretamente A12.3: o setor específico con
 
 | Fonte | Impacto |
 |-------|---------|
-| Arredondamento de bandas ($\nu_A$) | Pequeno; controlado pela escolha de $L$ |
-| Truncamento da distribuição (`max_loss_dollars`) | Mensurado por `tail_mass_upper_bound` |
+| Arredondamento de bandas ($\nu_A$) | Pequeno na distribuição; material apenas na alocação por contraparte |
+| Truncamento da distribuição (`max_loss_dollars`) | Mensurado por `tail_mass_upper_bound`; sem renormalização |
 | Normalização das PMFs após truncamento | Não realizada; evita distorção de momentos e quantis |
 | Implementação do setor específico | Variância zero, conforme A12.3 |
-| Precisão da planilha Excel | Limitada ao formato numérico do Excel |
+| Convenção de quantil (discreto vs. interpolado) | Menos de uma unidade $L$ |
+| Precisão da planilha Excel | Seis casas decimais na PMF; inteiros nas contribuições |
 
 ---
 
 ## 5. Testes Automatizados
 
-Os scripts de teste verificam:
+`run_tests.py` verifica:
 
-1. Reprodução dos valores de EL e VaR dos exemplos.
-2. Convergência do modelo NB para o modelo Poisson quando $\sigma \to 0$.
-3. Aditividade das contribuições de risco.
-4. Massa acumulada consistente com o limite de truncamento.
-5. Execução sem erros dos notebooks.
+1. limite Poisson da recursão contra a PMF fechada;
+2. momentos da PMF contra as equações analíticas 115–118;
+3. preservação exata da perda esperada apesar do arredondamento de bandas;
+4. estabilidade da recursão em log quando $e^{-\mu}$ subflui;
+5. rejeição de pesos setoriais que violem a equação 90;
+6. equivalência entre pools com multiplicidade e expansão contrato a contrato;
+7. identidade entre a API funcional e a classe;
+8. as cinco linhas da tabela da seção 2 desta página;
+9. aditividade da convenção `"manual"` e rejeição de convenções desconhecidas;
+10. maturidade do backbook no estudo longitudinal PF.
 
-Para executar todos os testes:
+`test_notebooks.py` executa todos os notebooks em memória, sem alterar os arquivos.
 
 ```bash
 source venv/bin/activate
 python run_tests.py
+python test_notebooks.py
 ```
 
 ---
 
 ## 6. Reprodutibilidade
 
-Todos os resultados são determinísticos para um dado conjunto de inputs. A semente aleatória é fixada onde necessário (por exemplo, na simulação Markov do notebook 10).
+O modelo é analítico: dada a mesma carteira, o resultado é determinístico e não depende de semente. A aleatoriedade aparece apenas no gerador de cenário sintético do notebook 11, cujas sementes são fixadas em `RetailSimulationConfig` e cujos fluxos de originação e de eventos são separados, de modo que ampliar o horizonte não reescreve defaults já reportados.
 
 ---
 
 ## 7. Conclusão
 
-A implementação reproduz os exemplos anuais oficiais com precisão subunitária. O caso multi-ano exige hipóteses adicionais sobre dependência temporal e, por isso, deve ser validado separadamente da regressão anual.
+A implementação reproduz integralmente os cinco exemplos oficiais: a distribuição inteira, todos os percentis publicados, o desvio padrão do manual e as contribuições de risco. As diferenças remanescentes são de convenção, estão documentadas e são selecionáveis por parâmetro.
+
+O caso multi-ano reproduz o tratamento de contrapartes virtuais da planilha, mas isso é uma construção contábil: ele não modela migração de rating nem dependência temporal, e deve ser validado separadamente da regressão anual.
